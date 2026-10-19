@@ -1,800 +1,624 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useEffect, useMemo, useState, type SyntheticEvent } from "react";
 import { useAuth } from "@/lib/auth-context";
-import { eventsApi, membersApi, type Event, type Member } from "@/lib/api";
+import {
+  errorMessage,
+  eventCategoriesApi,
+  eventsApi,
+  fieldError,
+  listAll,
+  type Event,
+  type RSVP,
+} from "@/lib/api";
+import { useAsync, useDebounced } from "@/lib/hooks";
+import { formatDate, formatDateTime, formatTime, fromLocalInput, humanize, toLocalInput, todayISO } from "@/lib/format";
 import { Modal, ConfirmDialog } from "@/components/ui/modal";
 import { useToast } from "@/components/ui/toast";
+import { Field, Input, Select, Switch, Textarea } from "@/components/ui/form";
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  ErrorState,
+  Icon,
+  PageHeader,
+  SearchInput,
+  Segmented,
+  Skeleton,
+} from "@/components/ui/primitives";
 
-interface EventItem {
-  id: string;
+const NEW_CATEGORY = "__new__";
+type When = "upcoming" | "past" | "all";
+
+interface EventForm {
   title: string;
-  time: string;
   category: string;
+  newCategory: string;
+  is_all_day: boolean;
+  start: string; // datetime-local or date
+  end: string;
   location: string;
-  date: string;
-  count?: string;
-  bg?: string;
-  color?: string;
-  sub?: string;
-  requiresRsvp?: boolean;
+  description: string;
+  requires_rsvp: boolean;
+  max_attendees: string;
+  is_public: boolean;
 }
 
-const SAMPLE_EVENTS: EventItem[] = [
-  {
-    id: "sample-1",
-    title: "Sunday Miracle & Celebration Service",
-    time: "09:30 AM",
-    date: "2026-10-04",
-    category: "Sunday Services",
-    location: "Main Sanctuary (TLPCI Central)",
-    count: "240 RSVP",
-    bg: "#1d4ed8",
-    color: "#ffffff",
-    sub: "Worship & Praise Team",
-  },
-  {
-    id: "sample-2",
-    title: "Wednesday Midweek Word & Prayer",
-    time: "07:00 PM",
-    date: "2026-10-07",
-    category: "Prayer Meetings",
-    location: "Fellowship Hall & Online",
-    count: "85 Attending",
-    bg: "#2151da",
-    color: "#ffffff",
-    sub: "Pastor Grace Miller",
-  },
-  {
-    id: "sample-3",
-    title: "Youth Fall Harvest Night",
-    time: "05:00 PM",
-    date: "2026-10-16",
-    category: "Youth & Children",
-    location: "Youth Hall & Chapel",
-    count: "150 Capacity",
-    bg: "#ffddb8",
-    color: "#2a1700",
-    sub: "TELPSAM Youth Committee",
-  },
-  {
-    id: "sample-4",
-    title: "Men's Breakfast & Word Fellowship",
-    time: "08:30 AM",
-    date: "2026-10-10",
-    category: "Bible Studies",
-    location: "Fellowship Hall",
-    count: "28 Men",
-    bg: "#855300",
-    color: "#ffffff",
-    sub: "Deacon Ray Campbell",
-  },
-];
+function defaultForm(): EventForm {
+  const start = new Date();
+  start.setDate(start.getDate() + 1);
+  start.setHours(9, 0, 0, 0);
+  const end = new Date(start);
+  end.setHours(11);
+  return {
+    title: "",
+    category: "",
+    newCategory: "",
+    is_all_day: false,
+    start: toLocalInput(start.toISOString()),
+    end: toLocalInput(end.toISOString()),
+    location: "",
+    description: "",
+    requires_rsvp: false,
+    max_attendees: "",
+    is_public: true,
+  };
+}
 
-const EVENT_TYPES = [
-  "Sunday Services",
-  "Youth & Children",
-  "Prayer Meetings",
-  "Bible Studies",
-  "Outreach & Community",
-];
-
-const CHURCH_VENUES = [
-  "Main Sanctuary (TLPCI Central)",
-  "Fellowship Hall",
-  "Youth Hall & Chapel",
-  "Children's Church Pavilion",
-  "Conference Room A (Admin)",
-  "Prayer Garden & Courtyard",
-  "Online / Virtual Livestream",
-];
+function eventRange(e: Event) {
+  if (e.is_all_day) {
+    const s = formatDate(e.start_datetime);
+    const en = formatDate(e.end_datetime);
+    return s === en ? "All day" : `All day · until ${en}`;
+  }
+  const sameDay = new Date(e.start_datetime).toDateString() === new Date(e.end_datetime).toDateString();
+  return sameDay
+    ? `${formatTime(e.start_datetime)} – ${formatTime(e.end_datetime)}`
+    : `${formatTime(e.start_datetime)} – ${formatDate(e.end_datetime, { month: "short", day: "numeric" })}, ${formatTime(e.end_datetime)}`;
+}
 
 export default function EventsPage() {
   const { token } = useAuth();
-  const { success, error } = useToast();
+  const toast = useToast();
+  const t = token ?? "";
 
-  const [view, setView] = useState("Month");
-  const [selectedCategory, setSelectedCategory] = useState("All Types");
-  const [events, setEvents] = useState<EventItem[]>([]);
-  const [membersList, setMembersList] = useState<Member[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [when, setWhen] = useState<When>("upcoming");
+  const [category, setCategory] = useState("");
+  const [search, setSearch] = useState("");
+  const debouncedSearch = useDebounced(search.trim());
 
-  // Modal / Form state for Create & Edit
-  const [showModal, setShowModal] = useState(false);
-  const [editingEvent, setEditingEvent] = useState<EventItem | null>(null);
-  const [formTitle, setFormTitle] = useState("");
-  const [formCategory, setFormCategory] = useState(EVENT_TYPES[0]);
-  const [formDate, setFormDate] = useState(new Date().toISOString().split("T")[0]);
-  const [formTime, setFormTime] = useState("09:00");
-  const [formLocation, setFormLocation] = useState(CHURCH_VENUES[0]);
-  const [selectedLocationMode, setSelectedLocationMode] = useState(CHURCH_VENUES[0]);
-  const [formLeader, setFormLeader] = useState("Ministry Team");
-  const [selectedLeaderMode, setSelectedLeaderMode] = useState("Ministry Team");
-  const [formRsvp, setFormRsvp] = useState(false);
-  const [formDesc, setFormDesc] = useState("");
-  const [formError, setFormError] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const categories = useAsync(token ? () => listAll(eventCategoriesApi.list, t) : null, [token]);
+  const events = useAsync(
+    token
+      ? () => {
+          const qs = new URLSearchParams({ ordering: "start_datetime" });
+          if (category) qs.set("category", category);
+          if (debouncedSearch) qs.set("search", debouncedSearch);
+          // Capture "now" alongside the data so rendering stays pure.
+          return listAll(eventsApi.list, t, qs.toString()).then((items) => ({ items, now: Date.now() }));
+        }
+      : null,
+    [token, category, debouncedSearch]
+  );
+  const now = events.data?.now ?? 0;
 
-  // Delete state
-  const [eventToDelete, setEventToDelete] = useState<EventItem | null>(null);
-  const [isDeleting, setIsDeleting] = useState(false);
+  const filtered = useMemo(() => {
+    const all = events.data?.items ?? [];
+    if (when === "upcoming") return all.filter((e) => new Date(e.end_datetime).getTime() >= now);
+    if (when === "past") return all.filter((e) => new Date(e.end_datetime).getTime() < now).reverse();
+    return all;
+  }, [events.data, when, now]);
 
-  const fetchEvents = useCallback(() => {
-    if (!token) {
-      setEvents(SAMPLE_EVENTS);
-      setLoading(false);
-      return;
+  const byMonth = useMemo(() => {
+    const groups: Array<{ key: string; label: string; items: Event[] }> = [];
+    for (const e of filtered) {
+      const d = new Date(e.start_datetime);
+      const key = `${d.getFullYear()}-${d.getMonth()}`;
+      let g = groups.find((x) => x.key === key);
+      if (!g) {
+        g = { key, label: d.toLocaleDateString("en-US", { month: "long", year: "numeric" }), items: [] };
+        groups.push(g);
+      }
+      g.items.push(e);
     }
+    return groups;
+  }, [filtered]);
 
-    setLoading(true);
-
-    // Fetch members for Host / Leader selector
-    membersApi
-      .list(token)
-      .then((r) => {
-        if (r.results && r.results.length > 0) {
-          setMembersList(r.results);
-        }
-      })
-      .catch((e) => console.warn("Members fetch fallback for events", e));
-
-    eventsApi
-      .list(token)
-      .then((res) => {
-        if (res.results && res.results.length > 0) {
-          const mapped: EventItem[] = res.results.map((e) => {
-            let timeStr = "09:00 AM";
-            let dateStr = "2026-10-04";
-            if (e.start_datetime) {
-              const d = new Date(e.start_datetime);
-              if (!isNaN(d.getTime())) {
-                timeStr = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-                dateStr = d.toISOString().split("T")[0];
-              }
-            }
-            return {
-              id: e.id,
-              title: e.title,
-              time: timeStr,
-              date: dateStr,
-              category: e.category_name || "Sunday Services",
-              location: e.location || "TLPCI Central",
-              count: e.rsvp_count ? `${e.rsvp_count} RSVP` : "Open Event",
-              bg: "#1d4ed8",
-              color: "#ffffff",
-              sub: e.description || "Church event",
-              requiresRsvp: e.requires_rsvp,
-            };
-          });
-          setEvents(mapped);
-        } else {
-          setEvents(SAMPLE_EVENTS);
-        }
-      })
-      .catch((e) => {
-        console.warn("Could not fetch remote events, using sample events", e);
-        setEvents(SAMPLE_EVENTS);
-      })
-      .finally(() => setLoading(false));
-  }, [token]);
-
-  useEffect(() => {
-    fetchEvents();
-  }, [fetchEvents]);
-
-  const openCreateModal = () => {
-    setEditingEvent(null);
-    setFormTitle("");
-    setFormCategory(EVENT_TYPES[0]);
-    setFormDate(new Date().toISOString().split("T")[0]);
-    setFormTime("09:00");
-    setFormLocation(CHURCH_VENUES[0]);
-    setSelectedLocationMode(CHURCH_VENUES[0]);
-    setFormLeader("Ministry Team");
-    setSelectedLeaderMode("Ministry Team");
-    setFormRsvp(false);
-    setFormDesc("");
-    setFormError("");
-    setShowModal(true);
+  // ── Create / edit ──────────────────────────────────────────────────────
+  const [formOpen, setFormOpen] = useState(false);
+  const [editing, setEditing] = useState<Event | null>(null);
+  const [form, setForm] = useState<EventForm>(defaultForm);
+  const [errors, setErrors] = useState<Partial<Record<keyof EventForm, string>>>({});
+  const [apiError, setApiError] = useState<unknown>(null);
+  const [saving, setSaving] = useState(false);
+  const setF = <K extends keyof EventForm>(k: K, v: EventForm[K]) => {
+    setForm((f) => ({ ...f, [k]: v }));
+    setErrors((e) => ({ ...e, [k]: undefined }));
   };
 
-  const openEditModal = (ev: EventItem) => {
-    setEditingEvent(ev);
-    setFormTitle(ev.title);
-    setFormCategory(ev.category || EVENT_TYPES[0]);
-    setFormDate(ev.date || new Date().toISOString().split("T")[0]);
-    setFormTime(ev.time.includes(":") ? ev.time.replace(/ AM| PM/, "") : "09:00");
-
-    const loc = ev.location || CHURCH_VENUES[0];
-    setFormLocation(loc);
-    setSelectedLocationMode(CHURCH_VENUES.includes(loc) ? loc : "custom");
-
-    const leader = ev.sub || "Ministry Team";
-    setFormLeader(leader);
-    const matched = membersList.some(
-      (m) => `${m.first_name} ${m.last_name}`.toLowerCase() === leader.toLowerCase()
-    );
-    setSelectedLeaderMode(matched ? leader : leader === "Ministry Team" ? "Ministry Team" : "custom");
-
-    setFormRsvp(ev.requiresRsvp ?? false);
-    setFormDesc(ev.sub || "");
-    setFormError("");
-    setShowModal(true);
+  const openCreate = () => {
+    setEditing(null);
+    setForm(defaultForm());
+    setErrors({});
+    setApiError(null);
+    setFormOpen(true);
   };
 
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!formTitle.trim()) {
-      setFormError("Event title is required.");
-      return;
-    }
+  const openEdit = (e: Event) => {
+    setEditing(e);
+    setForm({
+      title: e.title,
+      category: e.category ?? "",
+      newCategory: "",
+      is_all_day: e.is_all_day,
+      start: e.is_all_day ? toLocalInput(e.start_datetime).slice(0, 10) : toLocalInput(e.start_datetime),
+      end: e.is_all_day ? toLocalInput(e.end_datetime).slice(0, 10) : toLocalInput(e.end_datetime),
+      location: e.location ?? "",
+      description: e.description ?? "",
+      requires_rsvp: e.requires_rsvp,
+      max_attendees: e.max_attendees ? String(e.max_attendees) : "",
+      is_public: e.is_public ?? true,
+    });
+    setErrors({});
+    setApiError(null);
+    setFormOpen(true);
+  };
 
-    setFormError("");
-    setIsSubmitting(true);
+  const toggleAllDay = (v: boolean) => {
+    setForm((f) => ({
+      ...f,
+      is_all_day: v,
+      start: v ? f.start.slice(0, 10) : `${f.start.slice(0, 10)}T09:00`,
+      end: v ? f.end.slice(0, 10) : `${f.end.slice(0, 10)}T11:00`,
+    }));
+  };
 
+  const handleSave = async (ev: SyntheticEvent) => {
+    ev.preventDefault();
+    if (!token || saving) return;
+    const errs: typeof errors = {};
+    if (!form.title.trim()) errs.title = "Event title is required.";
+    if (!form.start) errs.start = "Choose a start.";
+    if (!form.end) errs.end = "Choose an end.";
+    if (form.category === NEW_CATEGORY && !form.newCategory.trim()) errs.newCategory = "Name the new category.";
+    const startIso = form.is_all_day ? fromLocalInput(`${form.start}T00:00`) : form.start ? fromLocalInput(form.start) : "";
+    const endIso = form.is_all_day ? fromLocalInput(`${form.end}T23:59`) : form.end ? fromLocalInput(form.end) : "";
+    if (startIso && endIso && new Date(endIso) < new Date(startIso)) errs.end = "The end must be after the start.";
+    setErrors(errs);
+    if (Object.keys(errs).length) return;
+
+    setSaving(true);
+    setApiError(null);
     try {
-      const startIso = `${formDate}T${formTime}:00Z`;
-
-      if (editingEvent) {
-        // UPDATE
-        if (token && !editingEvent.id.startsWith("sample-")) {
-          await eventsApi.update(token, editingEvent.id, {
-            title: formTitle.trim(),
-            location: formLocation.trim(),
-            start_datetime: startIso,
-            description: formDesc.trim(),
-            requires_rsvp: formRsvp,
-          });
-        }
-
-        setEvents((prev) =>
-          prev.map((item) =>
-            item.id === editingEvent.id
-              ? {
-                  ...item,
-                  title: formTitle.trim(),
-                  category: formCategory,
-                  date: formDate,
-                  time: formTime,
-                  location: formLocation.trim(),
-                  sub: formDesc.trim() || formLeader,
-                  requiresRsvp: formRsvp,
-                }
-              : item
-          )
-        );
-        success("Event updated", `"${formTitle.trim()}" has been updated.`);
+      let categoryId: string | null = form.category || null;
+      if (form.category === NEW_CATEGORY) {
+        const created = await eventCategoriesApi.create(t, { name: form.newCategory.trim() });
+        categoryId = created.id;
+        categories.reload();
+      }
+      const payload = {
+        title: form.title.trim(),
+        category: categoryId,
+        is_all_day: form.is_all_day,
+        start_datetime: startIso,
+        end_datetime: endIso,
+        location: form.location.trim(),
+        description: form.description.trim(),
+        requires_rsvp: form.requires_rsvp,
+        max_attendees: form.max_attendees ? Number(form.max_attendees) : null,
+        is_public: form.is_public,
+      };
+      if (editing) {
+        await eventsApi.update(t, editing.id, payload);
+        toast.success("Event updated", `${payload.title} was saved.`);
       } else {
-        // CREATE
-        let newId = Date.now().toString();
-        if (token) {
-          try {
-            const res = await eventsApi.create(token, {
-              title: formTitle.trim(),
-              location: formLocation.trim(),
-              start_datetime: startIso,
-              end_datetime: startIso,
-              description: formDesc.trim(),
-              requires_rsvp: formRsvp,
-            });
-            if (res?.id) newId = res.id;
-          } catch (apiErr: any) {
-            console.warn("Backend event create fallback", apiErr);
-          }
-        }
-
-        const newEv: EventItem = {
-          id: newId,
-          title: formTitle.trim(),
-          time: formTime,
-          date: formDate,
-          category: formCategory,
-          location: formLocation.trim(),
-          count: formRsvp ? "RSVP Open" : "Open Service",
-          bg: "#1d4ed8",
-          color: "#ffffff",
-          sub: formDesc.trim() || formLeader,
-          requiresRsvp: formRsvp,
-        };
-
-        setEvents((prev) => [newEv, ...prev]);
-        success("Event scheduled", `"${formTitle.trim()}" is now published.`);
+        await eventsApi.create(t, payload);
+        toast.success("Event scheduled", `${payload.title} is on the calendar.`);
       }
-
-      setShowModal(false);
-    } catch (err: any) {
-      setFormError(err?.detail || "Could not save event. Please check required fields.");
-      error("Save failed", err?.detail);
+      setFormOpen(false);
+      events.reload();
+    } catch (err) {
+      setApiError(err);
     } finally {
-      setIsSubmitting(false);
+      setSaving(false);
     }
   };
 
+  // ── Delete ─────────────────────────────────────────────────────────────
+  const [toDelete, setToDelete] = useState<Event | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const confirmDelete = async () => {
-    if (!eventToDelete) return;
-    setIsDeleting(true);
-
+    if (!token || !toDelete || deleting) return;
+    setDeleting(true);
     try {
-      if (token && !eventToDelete.id.startsWith("sample-")) {
-        await eventsApi.remove(token, eventToDelete.id);
-      }
-      setEvents((prev) => prev.filter((ev) => ev.id !== eventToDelete.id));
-      success("Event removed", `"${eventToDelete.title}" has been deleted.`);
-      setEventToDelete(null);
-    } catch (err: any) {
-      error("Delete failed", err?.detail || "Could not delete event.");
+      await eventsApi.remove(t, toDelete.id);
+      toast.success("Event deleted", `${toDelete.title} was removed from the calendar.`);
+      setToDelete(null);
+      if (viewing?.id === toDelete.id) setViewing(null);
+      events.reload();
+    } catch (err) {
+      toast.error("Couldn't delete event", errorMessage(err));
     } finally {
-      setIsDeleting(false);
+      setDeleting(false);
     }
   };
 
-  const filteredEvents = events.filter((ev) => {
-    if (selectedCategory === "All Types") return true;
-    return ev.category === selectedCategory;
-  });
+  // ── Details drawer ─────────────────────────────────────────────────────
+  const [viewing, setViewing] = useState<Event | null>(null);
+
+  const filtersActive = Boolean(category || debouncedSearch);
 
   return (
-    <div className="flex flex-col w-full px-4 sm:px-6 lg:px-8 py-6 gap-6 max-w-[1440px] mx-auto slide-up">
-      {/* Header */}
-      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-        <div className="space-y-1">
-          <div className="flex items-center gap-3">
-            <span style={{ fontSize: 30, fontWeight: 600, color: "#131b2e", letterSpacing: "-0.015em" }}>
-              Events &amp; Services
-            </span>
-            <span
-              className="inline-flex items-center px-2.5 py-0.5 rounded-full"
-              style={{ background: "#e2e7ff", color: "#0037b0", fontSize: 11 }}
-            >
-              <span className="w-1.5 h-1.5 rounded-full mr-1.5 animate-pulse" style={{ background: "#0037b0" }} />
-              Live Schedule
-            </span>
-          </div>
-          <p style={{ fontSize: 14, color: "#434655" }}>
-            Schedule services, ministry meetings, and church community events for TLPCI Central
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            onClick={fetchEvents}
-            disabled={loading}
-            title="Refresh events"
-            className="p-2.5 rounded-lg border border-[#e2e7ff] bg-white hover:bg-[#f2f3ff] text-[#434655] transition-colors"
-          >
-            <span className={`material-symbols-outlined text-sm ${loading ? "animate-spin" : ""}`}>
-              refresh
-            </span>
-          </button>
-          <button
-            onClick={openCreateModal}
-            className="px-4 py-2 rounded-lg shadow-sm transition-all flex items-center gap-1.5 hover:bg-blue-700 active:scale-95"
-            style={{ background: "#1d4ed8", color: "#ffffff", fontSize: 13, fontWeight: 600 }}
-          >
-            <span className="material-symbols-outlined text-lg">add</span>
-            <span>Create Event</span>
-          </button>
-        </div>
-      </div>
-
-      {/* Filter Pills */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
-        {["All Types", ...EVENT_TYPES].map((cat) => (
-          <button
-            key={cat}
-            onClick={() => setSelectedCategory(cat)}
-            className="px-3.5 py-1.5 rounded-full transition-all shadow-sm flex items-center gap-2 whitespace-nowrap text-xs font-semibold"
-            style={{
-              background: selectedCategory === cat ? "#1d4ed8" : "#ffffff",
-              color: selectedCategory === cat ? "#ffffff" : "#131b2e",
-              border: selectedCategory === cat ? "none" : "1px solid #e2e7ff",
-            }}
-          >
-            <span>{cat}</span>
-          </button>
-        ))}
-      </div>
-
-      {/* Main Grid: Events List & Side Quick Schedule Panel */}
-      <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
-        {/* Events Cards */}
-        <div className="xl:col-span-8 flex flex-col gap-4">
-          {loading ? (
-            <div className="flex items-center justify-center h-48 bg-white rounded-xl" style={{ color: "#747686" }}>
-              <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin mr-2" />
-              Loading church events...
-            </div>
-          ) : filteredEvents.length === 0 ? (
-            <div
-              className="bg-white rounded-xl p-12 text-center text-xs flex flex-col items-center justify-center gap-3 border shadow-sm"
-              style={{ borderColor: "#e2e7ff" }}
-            >
-              <div
-                className="w-12 h-12 rounded-full flex items-center justify-center"
-                style={{ background: "#eaedff", color: "#0037b0" }}
-              >
-                <span className="material-symbols-outlined text-2xl">event_busy</span>
-              </div>
-              <div>
-                <h4 className="text-sm font-bold" style={{ color: "#131b2e" }}>
-                  No scheduled events found
-                </h4>
-                <p className="text-xs mt-1 max-w-sm" style={{ color: "#747686" }}>
-                  {selectedCategory !== "All Types"
-                    ? `No events currently match the "${selectedCategory}" category filter.`
-                    : "No upcoming events scheduled. Click below to add a service or ministry gathering."}
-                </p>
-              </div>
-              {selectedCategory !== "All Types" ? (
-                <button
-                  onClick={() => setSelectedCategory("All Types")}
-                  className="sanctuary-btn-secondary text-xs mt-1"
-                >
-                  Show All Types
-                </button>
-              ) : (
-                <button onClick={openCreateModal} className="sanctuary-btn-primary text-xs mt-1">
-                  <span className="material-symbols-outlined text-sm">add</span>
-                  Create Event
-                </button>
-              )}
-            </div>
-          ) : (
-            filteredEvents.map((ev) => (
-              <div
-                key={ev.id}
-                className="bg-white rounded-xl p-5 shadow-sm border flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:shadow-md transition-shadow group"
-                style={{ borderColor: "#e2e7ff" }}
-              >
-                <div className="flex items-start gap-4">
-                  <div
-                    className="w-14 h-14 rounded-xl flex flex-col items-center justify-center flex-shrink-0"
-                    style={{ background: "#eaedff", color: "#0037b0" }}
-                  >
-                    <span className="text-[11px] font-bold uppercase">{ev.date ? new Date(ev.date).toLocaleDateString([], { month: "short" }) : "NOV"}</span>
-                    <span className="text-lg font-bold leading-tight">{ev.date ? new Date(ev.date).getDate() : "04"}</span>
-                  </div>
-
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span
-                        className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase"
-                        style={{ background: "#eaedff", color: "#0037b0" }}
-                      >
-                        {ev.category}
-                      </span>
-                      <span className="text-xs text-[#747686] flex items-center gap-1">
-                        <span className="material-symbols-outlined text-xs">schedule</span>
-                        {ev.time}
-                      </span>
-                    </div>
-                    <h3 className="text-base font-bold text-[#131b2e]">{ev.title}</h3>
-                    <p className="text-xs text-[#434655] flex items-center gap-1">
-                      <span className="material-symbols-outlined text-xs text-gray-400">location_on</span>
-                      {ev.location}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center justify-between sm:justify-end gap-3 pt-3 sm:pt-0 border-t sm:border-0 border-gray-100">
-                  <span
-                    className="px-3 py-1 rounded-full text-xs font-semibold"
-                    style={{ background: "#dcfce7", color: "#15803d" }}
-                  >
-                    {ev.count}
-                  </span>
-                  <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => openEditModal(ev)}
-                      title="Edit event"
-                      className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-blue-600 transition-colors"
-                    >
-                      <span className="material-symbols-outlined text-[18px]">edit</span>
-                    </button>
-                    <button
-                      onClick={() => setEventToDelete(ev)}
-                      title="Delete event"
-                      className="p-1.5 rounded-lg hover:bg-red-50 text-gray-400 hover:text-red-600 transition-colors"
-                    >
-                      <span className="material-symbols-outlined text-[18px]">delete</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-
-        {/* Side Panel: Quick Calendar Highlights */}
-        <div
-          className="xl:col-span-4 bg-white rounded-xl shadow-sm p-6 flex flex-col gap-4 border"
-          style={{ borderColor: "#e2e7ff" }}
-        >
-          <div className="flex items-center justify-between pb-3 border-b" style={{ borderColor: "#e2e7ff" }}>
-            <div>
-              <h3 style={{ fontSize: 16, fontWeight: 700, color: "#131b2e" }}>Service Schedule Summary</h3>
-              <p style={{ fontSize: 12, color: "#434655" }}>Weekly recurring fellowship &amp; services</p>
-            </div>
-            <span className="material-symbols-outlined text-blue-600">calendar_month</span>
-          </div>
-
-          <div className="space-y-3">
-            {[
-              { day: "Sunday", title: "Miracle & Celebration Service", time: "9:30 AM - 12:00 PM", hall: "Main Sanctuary" },
-              { day: "Tuesday", title: "Women's Devotional Roster", time: "6:00 PM - 7:30 PM", hall: "Upper Room" },
-              { day: "Wednesday", title: "Midweek Word & Prayer", time: "7:00 PM - 8:30 PM", hall: "Fellowship Hall" },
-              { day: "Thursday", title: "Choir Rehearsal", time: "7:00 PM - 9:00 PM", hall: "Main Sanctuary" },
-              { day: "Friday", title: "TELPSAM Youth Fellowship", time: "6:30 PM - 8:30 PM", hall: "Youth Hall" },
-              { day: "Saturday", title: "Men's Fellowship Breakfast", time: "8:30 AM - 10:00 AM", hall: "Fellowship Hall" },
-            ].map((sched) => (
-              <div key={sched.title} className="p-3 rounded-xl bg-[#f2f3ff] flex items-start gap-3">
-                <div className="w-16 flex-shrink-0">
-                  <span className="text-xs font-bold text-blue-700 block">{sched.day}</span>
-                  <span className="text-[10px] text-gray-500">{sched.time.split(" - ")[0]}</span>
-                </div>
-                <div className="min-w-0 flex-1">
-                  <span className="text-xs font-bold text-gray-900 block truncate">{sched.title}</span>
-                  <span className="text-[11px] text-gray-500">{sched.hall}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <button
-            onClick={openCreateModal}
-            className="w-full sanctuary-btn-primary text-xs justify-center py-2.5 mt-2"
-          >
-            <span className="material-symbols-outlined text-sm">add</span>
-            Schedule Special Event
-          </button>
-        </div>
-      </div>
-
-      {/* ── Modal: Create / Edit Event ───────────────────────────────── */}
-      <Modal
-        isOpen={showModal}
-        onClose={() => !isSubmitting && setShowModal(false)}
-        title={editingEvent ? "Edit Event" : "Create New Event"}
-        subtitle={
-          editingEvent
-            ? `Update details and venue for "${editingEvent.title}"`
-            : "Fill details to schedule and invite congregation to service or meeting"
+    <div className="flex flex-col gap-6">
+      <PageHeader
+        title="Events"
+        description="Services, meetings and church gatherings on the calendar."
+        actions={
+          <Button variant="primary" icon="add" onClick={openCreate}>
+            New event
+          </Button>
         }
-        isSubmitting={isSubmitting}
-      >
-        <form onSubmit={handleSave} className="space-y-4">
-          {formError && (
-            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
-              <span className="material-symbols-outlined text-sm">error</span>
-              <span>{formError}</span>
-            </div>
-          )}
+      />
 
-          <div>
-            <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-              Event Title *
-            </label>
-            <input
-              type="text"
-              required
-              disabled={isSubmitting}
-              placeholder="e.g. Youth Fall Harvest Night"
-              value={formTitle}
-              onChange={(e) => setFormTitle(e.target.value)}
-              className="w-full sanctuary-input text-sm disabled:opacity-50"
-            />
-          </div>
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <Segmented<When>
+          label="Time range"
+          value={when}
+          onChange={setWhen}
+          options={[
+            { value: "upcoming", label: "Upcoming" },
+            { value: "past", label: "Past" },
+            { value: "all", label: "All" },
+          ]}
+        />
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_220px] lg:min-w-[480px]">
+          <SearchInput value={search} onChange={setSearch} placeholder="Search title or location" label="Search events" />
+          <Select aria-label="Filter by category" value={category} onChange={(e) => setCategory(e.target.value)}>
+            <option value="">All categories</option>
+            {(categories.data ?? []).map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </Select>
+        </div>
+      </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-                Event Type / Ministry
-              </label>
-              <select
-                value={formCategory}
-                disabled={isSubmitting}
-                onChange={(e) => setFormCategory(e.target.value)}
-                className="w-full sanctuary-input text-sm cursor-pointer disabled:opacity-50"
-              >
-                {EVENT_TYPES.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-                Date *
-              </label>
-              <input
-                type="date"
-                required
-                disabled={isSubmitting}
-                value={formDate}
-                onChange={(e) => setFormDate(e.target.value)}
-                className="w-full sanctuary-input text-sm disabled:opacity-50"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-                Start Time *
-              </label>
-              <input
-                type="time"
-                required
-                disabled={isSubmitting}
-                value={formTime}
-                onChange={(e) => setFormTime(e.target.value)}
-                className="w-full sanctuary-input text-sm disabled:opacity-50"
-              />
-            </div>
-
-            <div>
-              <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-                Venue / Location *
-              </label>
-              <div className="space-y-1.5">
-                <select
-                  value={selectedLocationMode}
-                  disabled={isSubmitting}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setSelectedLocationMode(val);
-                    if (val !== "custom") {
-                      setFormLocation(val);
-                    } else {
-                      setFormLocation("");
-                    }
-                  }}
-                  className="w-full sanctuary-input text-sm cursor-pointer disabled:opacity-50"
-                >
-                  {CHURCH_VENUES.map((v) => (
-                    <option key={v} value={v}>
-                      {v}
-                    </option>
-                  ))}
-                  <option value="custom">+ Other / Custom Location</option>
-                </select>
-
-                {(selectedLocationMode === "custom" ||
-                  (!CHURCH_VENUES.includes(formLocation) && formLocation)) && (
-                  <input
-                    type="text"
-                    required
-                    disabled={isSubmitting}
-                    placeholder="Enter specific facility or address..."
-                    value={formLocation}
-                    onChange={(e) => setFormLocation(e.target.value)}
-                    className="w-full sanctuary-input text-sm disabled:opacity-50"
-                  />
-                )}
+      {events.loading && !events.data ? (
+        <Card className="divide-y divide-line">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="flex items-center gap-4 p-4">
+              <Skeleton className="h-14 w-14 rounded-lg" />
+              <div className="flex-1 space-y-2">
+                <Skeleton className="h-4 w-1/3" />
+                <Skeleton className="h-3.5 w-1/2" />
               </div>
             </div>
-          </div>
-
-          <div>
-            <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-              Leader / Host
-            </label>
-            <div className="space-y-1.5">
-              <select
-                value={selectedLeaderMode}
-                disabled={isSubmitting}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  setSelectedLeaderMode(val);
-                  if (val !== "custom") {
-                    setFormLeader(val);
-                  } else {
-                    setFormLeader("");
-                  }
-                }}
-                className="w-full sanctuary-input text-sm cursor-pointer disabled:opacity-50"
-              >
-                <option value="Ministry Team">Ministry Team / Pastoral Staff</option>
-                {membersList.map((m) => {
-                  const fullName = `${m.first_name} ${m.last_name}`;
+          ))}
+        </Card>
+      ) : events.error ? (
+        <Card>
+          <ErrorState message={events.error} onRetry={events.reload} />
+        </Card>
+      ) : filtered.length === 0 ? (
+        <Card>
+          {filtersActive ? (
+            <EmptyState
+              icon="search_off"
+              title="No events match"
+              description="Try another search or category."
+              action={
+                <Button
+                  onClick={() => {
+                    setSearch("");
+                    setCategory("");
+                  }}
+                >
+                  Clear filters
+                </Button>
+              }
+            />
+          ) : (
+            <EmptyState
+              icon="event_available"
+              title={when === "past" ? "No past events" : when === "upcoming" ? "Nothing scheduled" : "No events yet"}
+              description={when === "past" ? "Events appear here after they finish." : "Schedule a service, meeting or gathering."}
+              action={
+                when !== "past" ? (
+                  <Button variant="primary" icon="add" onClick={openCreate}>
+                    New event
+                  </Button>
+                ) : undefined
+              }
+            />
+          )}
+        </Card>
+      ) : (
+        <div className={`flex flex-col gap-6 ${events.loading ? "opacity-60" : ""}`}>
+          {byMonth.map((g) => (
+            <section key={g.key} aria-labelledby={`m-${g.key}`}>
+              <h2 id={`m-${g.key}`} className="mb-2 text-[13px] font-semibold uppercase tracking-wide text-ink-muted">
+                {g.label}
+              </h2>
+              <Card as="ul" className="divide-y divide-line overflow-hidden">
+                {g.items.map((e) => {
+                  const d = new Date(e.start_datetime);
+                  const past = new Date(e.end_datetime).getTime() < now;
                   return (
-                    <option key={m.id} value={fullName}>
-                      {fullName} {m.life_stage ? `(${m.life_stage})` : ""}
-                    </option>
+                    <li key={e.id} className="flex flex-col gap-3 p-4 transition-colors hover:bg-brand-softer sm:flex-row sm:items-center">
+                      <div className="flex min-w-0 flex-1 items-start gap-4">
+                        <span
+                          className={`flex h-14 w-14 flex-shrink-0 flex-col items-center justify-center rounded-lg border leading-none ${
+                            past ? "border-line bg-surface-muted text-ink-muted" : "border-[#cddcec] bg-brand-soft text-brand"
+                          }`}
+                        >
+                          <span className="text-[11px] font-semibold uppercase">{d.toLocaleDateString("en-US", { weekday: "short" })}</span>
+                          <span className="mt-1 text-xl font-semibold">{d.getDate()}</span>
+                        </span>
+                        <div className="min-w-0">
+                          <button type="button" onClick={() => setViewing(e)} className="text-left text-[15px] font-semibold text-ink hover:text-brand hover:underline">
+                            {e.title}
+                          </button>
+                          <p className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[13px] text-ink-muted">
+                            <span className="inline-flex items-center gap-1">
+                              <Icon name="schedule" size={15} />
+                              {eventRange(e)}
+                            </span>
+                            {e.location && (
+                              <span className="inline-flex items-center gap-1">
+                                <Icon name="location_on" size={15} />
+                                {e.location}
+                              </span>
+                            )}
+                          </p>
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {e.category_name && <Badge tone="brand">{e.category_name}</Badge>}
+                            {e.requires_rsvp && (
+                              <Badge tone="accent" icon="how_to_reg">
+                                {e.rsvp_count} attending{e.max_attendees ? ` / ${e.max_attendees}` : ""}
+                              </Badge>
+                            )}
+                            {e.is_public === false && <Badge tone="neutral" icon="lock">Private</Badge>}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 self-end sm:self-center">
+                        <Button size="sm" variant="ghost" onClick={() => setViewing(e)}>
+                          Details
+                        </Button>
+                        <Button size="sm" variant="ghost" iconOnly icon="edit" aria-label={`Edit ${e.title}`} title="Edit" onClick={() => openEdit(e)} />
+                        <Button size="sm" variant="danger-ghost" iconOnly icon="delete" aria-label={`Delete ${e.title}`} title="Delete" onClick={() => setToDelete(e)} />
+                      </div>
+                    </li>
                   );
                 })}
-                <option value="custom">+ Other / Enter Custom Host</option>
-              </select>
+              </Card>
+            </section>
+          ))}
+        </div>
+      )}
 
-              {(selectedLeaderMode === "custom" ||
-                (selectedLeaderMode !== "Ministry Team" &&
-                  !membersList.some(
-                    (m) =>
-                      `${m.first_name} ${m.last_name}`.toLowerCase() === formLeader.toLowerCase()
-                  ) &&
-                  formLeader)) && (
-                <input
-                  type="text"
-                  disabled={isSubmitting}
-                  placeholder="e.g. Pastor Grace Miller, Visiting Evangelist"
-                  value={formLeader}
-                  onChange={(e) => setFormLeader(e.target.value)}
-                  className="w-full sanctuary-input text-sm disabled:opacity-50"
-                />
-              )}
-            </div>
-          </div>
-
-          <div>
-            <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-              Event Description &amp; Details
-            </label>
-            <textarea
-              rows={3}
-              disabled={isSubmitting}
-              placeholder="Agenda, special guest ministers, guidelines..."
-              value={formDesc}
-              onChange={(e) => setFormDesc(e.target.value)}
-              className="w-full sanctuary-input text-sm disabled:opacity-50 leading-relaxed"
-            />
-          </div>
-
-          <div className="flex items-center justify-between pt-1">
-            <div>
-              <span className="text-xs font-bold block" style={{ color: "#131b2e" }}>
-                Require RSVP Registration
-              </span>
-              <span className="text-[11px]" style={{ color: "#747686" }}>
-                Track headcounts for catering and seating
-              </span>
-            </div>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                checked={formRsvp}
-                disabled={isSubmitting}
-                onChange={(e) => setFormRsvp(e.target.checked)}
-                className="sr-only peer"
-              />
-              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-            </label>
-          </div>
-
-          <div className="flex items-center justify-end gap-2 pt-4 border-t" style={{ borderColor: "#f2f3ff" }}>
-            <button
-              type="button"
-              disabled={isSubmitting}
-              onClick={() => setShowModal(false)}
-              className="sanctuary-btn-secondary text-xs disabled:opacity-50"
-            >
+      {/* Create / edit */}
+      <Modal
+        isOpen={formOpen}
+        onClose={() => setFormOpen(false)}
+        title={editing ? "Edit event" : "New event"}
+        subtitle={editing ? `Update ${editing.title}.` : "Add a service, meeting or gathering to the calendar."}
+        maxWidth="xl"
+        isSubmitting={saving}
+        footer={
+          <>
+            <Button onClick={() => setFormOpen(false)} disabled={saving}>
               Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={isSubmitting}
-              className="sanctuary-btn-primary text-xs flex items-center gap-1.5 disabled:opacity-60"
-            >
-              {isSubmitting && (
-                <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+            </Button>
+            <Button type="submit" form="event-form" variant="primary" loading={saving}>
+              {editing ? "Save changes" : "Schedule event"}
+            </Button>
+          </>
+        }
+      >
+        <form id="event-form" onSubmit={handleSave} noValidate className="flex flex-col gap-5">
+          {apiError ? <Alert title="Couldn't save event">{errorMessage(apiError)}</Alert> : null}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <Field label="Title" required error={errors.title || fieldError(apiError, "title")} className="sm:col-span-2">
+              {(p) => <Input {...p} value={form.title} disabled={saving} placeholder="e.g. Youth Harvest Night" onChange={(e) => setF("title", e.target.value)} />}
+            </Field>
+            <Field label="Category">
+              {(p) => (
+                <Select {...p} value={form.category} disabled={saving} onChange={(e) => setF("category", e.target.value)}>
+                  <option value="">Uncategorized</option>
+                  {(categories.data ?? []).map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                  <option value={NEW_CATEGORY}>+ New category…</option>
+                </Select>
               )}
-              <span>{editingEvent ? "Save Changes" : "Publish Event"}</span>
-            </button>
+            </Field>
+            {form.category === NEW_CATEGORY ? (
+              <Field label="New category name" required error={errors.newCategory}>
+                {(p) => <Input {...p} value={form.newCategory} disabled={saving} onChange={(e) => setF("newCategory", e.target.value)} />}
+              </Field>
+            ) : (
+              <Field label="Location">
+                {(p) => <Input {...p} value={form.location} disabled={saving} placeholder="e.g. Main Sanctuary" onChange={(e) => setF("location", e.target.value)} />}
+              </Field>
+            )}
+            {form.category === NEW_CATEGORY && (
+              <Field label="Location" className="sm:col-span-2">
+                {(p) => <Input {...p} value={form.location} disabled={saving} onChange={(e) => setF("location", e.target.value)} />}
+              </Field>
+            )}
+          </div>
+
+          <div className="rounded-lg border border-line p-4">
+            <Switch checked={form.is_all_day} onChange={toggleAllDay} disabled={saving} label="All-day event" />
+            <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <Field label="Starts" required error={errors.start || fieldError(apiError, "start_datetime")}>
+                {(p) => (
+                  <Input
+                    {...p}
+                    type={form.is_all_day ? "date" : "datetime-local"}
+                    value={form.start}
+                    min={editing ? undefined : form.is_all_day ? todayISO() : undefined}
+                    disabled={saving}
+                    onChange={(e) => setF("start", e.target.value)}
+                  />
+                )}
+              </Field>
+              <Field label="Ends" required error={errors.end || fieldError(apiError, "end_datetime")}>
+                {(p) => (
+                  <Input {...p} type={form.is_all_day ? "date" : "datetime-local"} value={form.end} min={form.start} disabled={saving} onChange={(e) => setF("end", e.target.value)} />
+                )}
+              </Field>
+            </div>
+          </div>
+
+          <Field label="Description">
+            {(p) => <Textarea {...p} rows={3} value={form.description} disabled={saving} placeholder="Agenda, speakers, what to bring…" onChange={(e) => setF("description", e.target.value)} />}
+          </Field>
+
+          <div className="flex flex-col gap-4 rounded-lg border border-line bg-surface-muted p-4">
+            <Switch checked={form.requires_rsvp} onChange={(v) => setF("requires_rsvp", v)} disabled={saving} label="Requires RSVP" description="Track who plans to attend." />
+            {form.requires_rsvp && (
+              <Field label="Maximum attendees" hint="Leave blank for no limit" error={fieldError(apiError, "max_attendees")}>
+                {(p) => <Input {...p} type="number" min={1} inputMode="numeric" value={form.max_attendees} disabled={saving} onChange={(e) => setF("max_attendees", e.target.value)} />}
+              </Field>
+            )}
+            <Switch checked={form.is_public} onChange={(v) => setF("is_public", v)} disabled={saving} label="Public event" description="Private events are for staff and invited groups." />
           </div>
         </form>
       </Modal>
 
-      {/* ── Confirmation Dialog: Delete Event ────────────────────────── */}
       <ConfirmDialog
-        isOpen={Boolean(eventToDelete)}
-        onClose={() => !isDeleting && setEventToDelete(null)}
+        isOpen={Boolean(toDelete)}
+        onClose={() => setToDelete(null)}
         onConfirm={confirmDelete}
-        title="Delete Event"
-        message={`Are you sure you want to delete "${eventToDelete?.title}"? All scheduled reminders and registration rosters will be cancelled.`}
-        confirmText="Delete Event"
-        isLoading={isDeleting}
-        isDestructive={true}
+        title="Delete event?"
+        message={
+          <>
+            <strong className="font-semibold text-ink">{toDelete?.title}</strong>
+            {toDelete ? ` on ${formatDate(toDelete.start_datetime)}` : ""} will be removed from the calendar along with its RSVPs.
+          </>
+        }
+        confirmText="Delete event"
+        isLoading={deleting}
+      />
+
+      <EventDrawer
+        key={viewing?.id ?? "closed"}
+        event={viewing}
+        token={t}
+        onClose={() => setViewing(null)}
+        onEdit={(e) => {
+          setViewing(null);
+          openEdit(e);
+        }}
       />
     </div>
+  );
+}
+
+function EventDrawer({ event, token, onClose, onEdit }: { event: Event | null; token: string; onClose: () => void; onEdit: (e: Event) => void }) {
+  const [rsvps, setRsvps] = useState<RSVP[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!event?.requires_rsvp) return;
+    eventsApi.rsvps(token, event.id).then(setRsvps).catch((e) => setError(errorMessage(e)));
+  }, [event, token]);
+
+  return (
+    <Modal
+      isOpen={Boolean(event)}
+      onClose={onClose}
+      title={event?.title ?? "Event"}
+      subtitle={event ? formatDate(event.start_datetime, { weekday: "long", month: "long", day: "numeric", year: "numeric" }) : undefined}
+      variant="drawer"
+      maxWidth="sm:max-w-md"
+      footer={
+        event ? (
+          <>
+            <Button onClick={onClose}>Close</Button>
+            <Button variant="primary" icon="edit" onClick={() => onEdit(event)}>
+              Edit event
+            </Button>
+          </>
+        ) : undefined
+      }
+    >
+      {event && (
+        <div className="flex flex-col gap-5">
+          <dl className="flex flex-col gap-3 text-sm">
+            <div className="flex gap-3">
+              <Icon name="schedule" className="text-ink-muted" />
+              <div>
+                <dt className="sr-only">When</dt>
+                <dd className="text-ink">{eventRange(event)}</dd>
+                {!event.is_all_day && <dd className="text-[13px] text-ink-muted">Ends {formatDateTime(event.end_datetime)}</dd>}
+              </div>
+            </div>
+            {event.location && (
+              <div className="flex gap-3">
+                <Icon name="location_on" className="text-ink-muted" />
+                <div>
+                  <dt className="sr-only">Location</dt>
+                  <dd className="text-ink">{event.location}</dd>
+                </div>
+              </div>
+            )}
+            {event.category_name && (
+              <div className="flex gap-3">
+                <Icon name="sell" className="text-ink-muted" />
+                <div>
+                  <dt className="sr-only">Category</dt>
+                  <dd className="text-ink">{event.category_name}</dd>
+                </div>
+              </div>
+            )}
+          </dl>
+
+          <div>
+            <h3 className="text-sm font-semibold text-ink">About</h3>
+            <p className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-ink-muted">{event.description || "No description provided."}</p>
+          </div>
+
+          {event.requires_rsvp && (
+            <div>
+              <h3 className="text-sm font-semibold text-ink">
+                RSVPs {rsvps ? `(${rsvps.length})` : ""}
+                {event.max_attendees ? <span className="font-normal text-ink-muted"> · limit {event.max_attendees}</span> : null}
+              </h3>
+              {error ? (
+                <p className="mt-2 text-[13px] text-danger">{error}</p>
+              ) : !rsvps ? (
+                <div className="mt-2 space-y-2">
+                  <Skeleton className="h-9 w-full" />
+                  <Skeleton className="h-9 w-full" />
+                </div>
+              ) : rsvps.length === 0 ? (
+                <p className="mt-2 rounded-lg border border-dashed border-line px-3 py-4 text-center text-[13px] text-ink-muted">No RSVPs yet.</p>
+              ) : (
+                <ul className="mt-2 divide-y divide-line rounded-lg border border-line">
+                  {rsvps.map((r) => (
+                    <li key={r.id} className="flex items-center justify-between gap-3 px-3 py-2 text-[13px]">
+                      <span className="truncate text-ink">
+                        {r.member_name || r.guest_name || "Guest"}
+                        {r.guest_count > 1 ? <span className="text-ink-muted"> +{r.guest_count - 1}</span> : null}
+                      </span>
+                      <Badge tone={r.status === "attending" ? "success" : r.status === "maybe" ? "warning" : "neutral"}>{humanize(r.status)}</Badge>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </Modal>
   );
 }

@@ -1,6 +1,7 @@
 "use client";
 
-import React, { createContext, useContext, useState, useCallback } from "react";
+import React, { createContext, useCallback, useContext, useRef, useState } from "react";
+import { Icon } from "./primitives";
 
 export type ToastType = "success" | "error" | "info" | "warning";
 
@@ -17,113 +18,83 @@ interface ToastContextValue {
   success: (title: string, message?: string) => void;
   error: (title: string, message?: string) => void;
   info: (title: string, message?: string) => void;
+  warning: (title: string, message?: string) => void;
   removeToast: (id: string) => void;
 }
 
 const ToastContext = createContext<ToastContextValue | undefined>(undefined);
 
+const STYLES: Record<ToastType, { icon: string; iconCls: string }> = {
+  success: { icon: "check_circle", iconCls: "text-success" },
+  error: { icon: "error", iconCls: "text-danger" },
+  warning: { icon: "warning", iconCls: "text-warning" },
+  info: { icon: "info", iconCls: "text-brand" },
+};
+
+const MAX_VISIBLE = 4;
+
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const timers = useRef(new Map<string, number>());
 
   const removeToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
+    const timer = timers.current.get(id);
+    if (timer) window.clearTimeout(timer);
+    timers.current.delete(id);
   }, []);
 
   const showToast = useCallback(
     ({ type, title, message }: Omit<ToastItem, "id">) => {
-      const id = Date.now().toString() + Math.random().toString(36).substring(2, 6);
-      setToasts((prev) => [...prev, { id, type, title, message }]);
-      setTimeout(() => {
-        removeToast(id);
-      }, 4200);
+      const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      setToasts((prev) => {
+        // Avoid stacking identical messages (e.g. repeated failed retries).
+        const withoutDupes = prev.filter((t) => !(t.type === type && t.title === title && t.message === message));
+        return [...withoutDupes, { id, type, title, message }].slice(-MAX_VISIBLE);
+      });
+      const ttl = type === "error" ? 7000 : 4500;
+      timers.current.set(id, window.setTimeout(() => removeToast(id), ttl));
     },
     [removeToast]
   );
 
-  const success = useCallback(
-    (title: string, message?: string) => showToast({ type: "success", title, message }),
-    [showToast]
-  );
-
-  const error = useCallback(
-    (title: string, message?: string) => showToast({ type: "error", title, message }),
-    [showToast]
-  );
-
-  const info = useCallback(
-    (title: string, message?: string) => showToast({ type: "info", title, message }),
-    [showToast]
-  );
+  const success = useCallback((title: string, message?: string) => showToast({ type: "success", title, message }), [showToast]);
+  const error = useCallback((title: string, message?: string) => showToast({ type: "error", title, message }), [showToast]);
+  const info = useCallback((title: string, message?: string) => showToast({ type: "info", title, message }), [showToast]);
+  const warning = useCallback((title: string, message?: string) => showToast({ type: "warning", title, message }), [showToast]);
 
   return (
-    <ToastContext.Provider value={{ toasts, showToast, success, error, info, removeToast }}>
+    <ToastContext.Provider value={{ toasts, showToast, success, error, info, warning, removeToast }}>
       {children}
-      {/* Toast container */}
-      <div className="fixed bottom-5 right-5 z-[9999] flex flex-col gap-2 max-w-sm w-full pointer-events-none px-4">
-        {toasts.map((t) => (
-          <div
-            key={t.id}
-            className="pointer-events-auto p-4 rounded-xl shadow-lg border flex items-start gap-3 bg-white animate-in slide-in-from-bottom-5 duration-200"
-            style={{
-              borderColor:
-                t.type === "success"
-                  ? "#bbf7d0"
-                  : t.type === "error"
-                  ? "#fecaca"
-                  : t.type === "warning"
-                  ? "#fed7aa"
-                  : "#e2e7ff",
-            }}
-          >
+      <div
+        aria-live="polite"
+        aria-relevant="additions"
+        className="pointer-events-none fixed inset-x-0 bottom-0 z-[80] flex flex-col items-center gap-2 p-4 sm:inset-x-auto sm:right-0 sm:items-end sm:p-6"
+      >
+        {toasts.map((t) => {
+          const s = STYLES[t.type];
+          return (
             <div
-              className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0"
-              style={{
-                background:
-                  t.type === "success"
-                    ? "#dcfce7"
-                    : t.type === "error"
-                    ? "#fee2e2"
-                    : t.type === "warning"
-                    ? "#ffedd5"
-                    : "#dce1ff",
-                color:
-                  t.type === "success"
-                    ? "#15803d"
-                    : t.type === "error"
-                    ? "#b91c1c"
-                    : t.type === "warning"
-                    ? "#c2410c"
-                    : "#0037b0",
-              }}
+              key={t.id}
+              role={t.type === "error" ? "alert" : "status"}
+              className="pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-xl border border-line bg-surface p-3.5 shadow-[var(--shadow-overlay)] animate-toast-in"
             >
-              <span className="material-symbols-outlined text-[18px]">
-                {t.type === "success"
-                  ? "check_circle"
-                  : t.type === "error"
-                  ? "error"
-                  : t.type === "warning"
-                  ? "warning"
-                  : "info"}
-              </span>
+              <Icon name={s.icon} size={20} filled className={`mt-px ${s.iconCls}`} />
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold leading-5 text-ink">{t.title}</p>
+                {t.message && <p className="mt-0.5 text-[13px] leading-5 text-ink-muted">{t.message}</p>}
+              </div>
+              <button
+                type="button"
+                onClick={() => removeToast(t.id)}
+                aria-label="Dismiss notification"
+                className="-mr-1 -mt-1 inline-flex h-7 w-7 items-center justify-center rounded-md text-ink-subtle transition-colors hover:bg-canvas hover:text-ink"
+              >
+                <Icon name="close" size={16} />
+              </button>
             </div>
-            <div className="flex-1 min-w-0">
-              <h4 className="text-xs font-bold leading-tight" style={{ color: "#131b2e" }}>
-                {t.title}
-              </h4>
-              {t.message && (
-                <p className="text-[11px] mt-0.5 leading-snug" style={{ color: "#434655" }}>
-                  {t.message}
-                </p>
-              )}
-            </div>
-            <button
-              onClick={() => removeToast(t.id)}
-              className="text-gray-400 hover:text-gray-600 transition-colors -mr-1 -mt-1 p-1"
-            >
-              <span className="material-symbols-outlined text-[16px]">close</span>
-            </button>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </ToastContext.Provider>
   );

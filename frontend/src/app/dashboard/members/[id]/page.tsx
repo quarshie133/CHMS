@@ -1,1156 +1,564 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useState, type SyntheticEvent } from "react";
 import Link from "next/link";
-import { useAuth } from "@/lib/auth-context";
-import { membersApi, type Member } from "@/lib/api";
+import { useParams, useRouter } from "next/navigation";
+import { useAuth, PASTOR_ROLES } from "@/lib/auth-context";
+import {
+  contributionsApi,
+  errorMessage,
+  familiesApi,
+  listAll,
+  membersApi,
+  type Family,
+  type MemberDetail,
+} from "@/lib/api";
+import { useAsync } from "@/lib/hooks";
+import {
+  formatDate,
+  formatDateTime,
+  formatMoney,
+  GENDERS,
+  initials,
+  labelFor,
+  LIFE_STAGES,
+  MARITAL_STATUSES,
+  CONTRIBUTION_TYPES,
+  PAYMENT_METHODS,
+  relativeTime,
+} from "@/lib/format";
 import { Modal, ConfirmDialog } from "@/components/ui/modal";
 import { useToast } from "@/components/ui/toast";
+import { Field, Textarea } from "@/components/ui/form";
+import { MemberStatusBadge } from "@/components/domain";
+import {
+  Alert,
+  Avatar,
+  Badge,
+  Button,
+  ButtonLink,
+  Card,
+  CardHeader,
+  DetailList,
+  EmptyState,
+  ErrorState,
+  Icon,
+  Segmented,
+  Skeleton,
+  TableSkeleton,
+} from "@/components/ui/primitives";
+import {
+  formToPayload,
+  MemberFullForm,
+  memberToForm,
+  validateMember,
+  type MemberFormErrors,
+  type MemberFormValues,
+  emptyMember,
+} from "@/components/member-form";
 
-type TabKey = "overview" | "family" | "groups" | "attendance" | "giving" | "notes" | "comms";
+type Tab = "overview" | "household" | "giving" | "notes";
 
 export default function MemberProfilePage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
-  const { token } = useAuth();
-  const { success, error } = useToast();
+  const { token, user, hasRole } = useAuth();
+  const toast = useToast();
+  const t = token ?? "";
+  const canSeeNotes = hasRole(...PASTOR_ROLES);
 
-  const [member, setMember] = useState<Member | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<TabKey>("overview");
-  const [showAddNoteModal, setShowAddNoteModal] = useState(false);
-  const [newNoteText, setNewNoteText] = useState("");
+  const [tab, setTab] = useState<Tab>("overview");
+  const record = useAsync(token && id ? () => membersApi.detail(t, id) : null, [token, id]);
+  const member = record.data;
 
-  // Edit Profile Modal State
-  const [showEditModal, setShowEditModal] = useState(false);
-  const [editFirstName, setEditFirstName] = useState("");
-  const [editLastName, setEditLastName] = useState("");
-  const [editEmail, setEditEmail] = useState("");
-  const [editPhone, setEditPhone] = useState("");
-  const [editStatus, setEditStatus] = useState("active");
-  const [editLifeStage, setEditLifeStage] = useState("adult");
-  const [editFamily, setEditFamily] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [formError, setFormError] = useState("");
+  // ── Edit ───────────────────────────────────────────────────────────────
+  const [editOpen, setEditOpen] = useState(false);
+  const [values, setValues] = useState<MemberFormValues>(emptyMember);
+  const [errors, setErrors] = useState<MemberFormErrors>({});
+  const [apiError, setApiError] = useState<unknown>(null);
+  const [saving, setSaving] = useState(false);
+  const [families, setFamilies] = useState<Family[]>([]);
 
-  // Delete Profile State
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const [isDeleting, setIsDeleting] = useState(false);
+  const set = <K extends keyof MemberFormValues>(key: K, value: MemberFormValues[K]) => {
+    setValues((v) => ({ ...v, [key]: value }));
+    if (key in errors) setErrors((e) => ({ ...e, [key]: undefined }));
+  };
 
-  const [notesList, setNotesList] = useState([
-    {
-      id: "1",
-      initials: "GM",
-      author: "Pastor Grace Miller",
-      avatarBg: "#1d4ed8",
-      avatarColor: "#ffffff",
-      date: "3 days ago",
-      text: "“Met for coffee regarding new family small group kickoff. Enthusiastic about leading weekly prayer.”",
-      status: "Follow-up completed",
-    },
-    {
-      id: "2",
-      initials: "ET",
-      author: "Elder Thomas",
-      avatarBg: "#855300",
-      avatarColor: "#ffffff",
-      date: "Sep 15",
-      text: "“Marcus volunteered for fall community outreach logistics. Coordinated team setup with church facilities.”",
-      tag: "#Volunteering #Outreach",
-    },
-  ]);
-
-  useEffect(() => {
-    if (!token || !id) return;
-    setLoading(true);
-    membersApi
-      .get(token, id)
-      .then((m) => setMember(m))
-      .catch((err) => {
-        console.warn("Could not fetch remote member, using demo profile fallback", err);
-        setMember({
-          id,
-          full_name: "Marcus Sterling",
-          first_name: "Marcus",
-          last_name: "Sterling",
-          email: "m.sterling@email.com",
-          phone_mobile: "(555) 234-8901",
-          status: "active",
-          life_stage: "adult",
-          photo:
-            "https://lh3.googleusercontent.com/aida-public/AB6AXuDywSpo0Yd1s8U0enVlimDoSOfGNxshvHFUIpGOzdaoFEhDBuUXfkQeki8AcNOktH5LyCZ2e8xzMfceUypz_Y5UzA-C9ZZmhkSo_tnDZTThiddeAdoGMCEsXahCtYSau0g_-5TGzN71ddWwWrGpIP7AQQNOp1gwDFZC-ppw9XwMTOzAUrm7fwBM2yEllN3FXHEJ4x3n9cmPSDQdYBCTMiPlgHruqedeMrZ0v8Nxh_Wi1JUURWGGULDs8Q",
-          age: 38,
-          family_name: "Sterling Family",
-          membership_date: "2021-10-15",
-          created_at: "2021-10-15T00:00:00Z",
-        });
-      })
-      .finally(() => setLoading(false));
-  }, [token, id]);
-
-  const openEditModal = () => {
+  const openEdit = () => {
     if (!member) return;
-    setEditFirstName(member.first_name || "");
-    setEditLastName(member.last_name || "");
-    setEditEmail(member.email || "");
-    setEditPhone(member.phone_mobile || "");
-    setEditStatus(member.status || "active");
-    setEditLifeStage(member.life_stage || "adult");
-    setEditFamily(member.family_name || "");
-    setFormError("");
-    setShowEditModal(true);
+    setValues(memberToForm(member));
+    setErrors({});
+    setApiError(null);
+    setEditOpen(true);
+    if (token && families.length === 0) {
+      listAll(familiesApi.list, token, "ordering=name").then(setFamilies).catch(() => setFamilies([]));
+    }
   };
 
-  const handleSaveProfile = async (e: React.FormEvent) => {
+  const handleSave = async (e: SyntheticEvent) => {
     e.preventDefault();
-    if (!token || !id) return;
-    if (!editFirstName.trim() || !editLastName.trim()) {
-      setFormError("First name and last name are required.");
-      return;
-    }
-    setIsSubmitting(true);
-    setFormError("");
+    if (!token || !member || saving) return;
+    const v = validateMember(values);
+    setErrors(v);
+    if (Object.keys(v).length) return;
+    setSaving(true);
+    setApiError(null);
     try {
-      const updated = await membersApi.update(token, id, {
-        first_name: editFirstName.trim(),
-        last_name: editLastName.trim(),
-        email: editEmail.trim() || undefined,
-        phone_mobile: editPhone.trim() || undefined,
-        status: editStatus,
-        life_stage: editLifeStage,
-        family_name: editFamily.trim() || undefined,
-      });
-      setMember(updated);
-      success("Congregant profile updated successfully.");
-      setShowEditModal(false);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Failed to update profile.";
-      setFormError(msg);
-      error(msg);
+      const updated = (await membersApi.update(token, member.id, formToPayload(values))) as unknown as MemberDetail;
+      record.setData(updated);
+      toast.success("Profile updated", `${updated.full_name}'s profile was saved.`);
+      setEditOpen(false);
+    } catch (err) {
+      setApiError(err);
     } finally {
-      setIsSubmitting(false);
+      setSaving(false);
     }
   };
 
-  const handleDeleteMember = async () => {
-    if (!token || !id) return;
-    setIsDeleting(true);
+  // ── Delete ─────────────────────────────────────────────────────────────
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const handleDelete = async () => {
+    if (!token || !member || deleting) return;
+    setDeleting(true);
     try {
-      await membersApi.remove(token, id);
-      success("Congregant profile removed from directory.");
+      await membersApi.remove(token, member.id);
+      toast.success("Person removed", `${member.full_name} was removed from the directory.`);
       router.push("/dashboard/members");
-    } catch (err: unknown) {
-      error(err instanceof Error ? err.message : "Failed to delete congregant profile.");
-      setIsDeleting(false);
-      setShowDeleteConfirm(false);
+    } catch (err) {
+      toast.error("Couldn't remove person", errorMessage(err));
+      setDeleting(false);
+      setConfirmDelete(false);
     }
   };
 
-  const handleAddNote = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newNoteText.trim()) return;
-    setNotesList([
-      {
-        id: Date.now().toString(),
-        initials: "GM",
-        author: "Pastor Grace Miller",
-        avatarBg: "#1d4ed8",
-        avatarColor: "#ffffff",
-        date: "Just now",
-        text: `“${newNoteText}”`,
-        status: "Active note",
-      },
-      ...notesList,
-    ]);
-    setNewNoteText("");
-    setShowAddNoteModal(false);
-    success("Pastoral care note recorded securely.");
-  };
+  if (record.loading && !member) {
+    return (
+      <div className="flex flex-col gap-6" aria-busy="true">
+        <Card className="p-6">
+          <div className="flex items-center gap-4">
+            <Skeleton className="h-16 w-16 rounded-full" />
+            <div className="flex-1 space-y-2">
+              <Skeleton className="h-6 w-56" />
+              <Skeleton className="h-4 w-80 max-w-full" />
+            </div>
+          </div>
+        </Card>
+        <Card>
+          <TableSkeleton rows={4} />
+        </Card>
+      </div>
+    );
+  }
 
-  const displayName = member?.full_name || (member ? `${member.first_name} ${member.last_name}` : "Marcus Sterling");
+  if (record.error || !member) {
+    return (
+      <Card>
+        <ErrorState message={record.error ?? "This person could not be found."} onRetry={record.reload} />
+        <div className="flex justify-center pb-8">
+          <ButtonLink href="/dashboard/members" icon="arrow_back" variant="ghost">
+            Back to people
+          </ButtonLink>
+        </div>
+      </Card>
+    );
+  }
+
+  const tabs: Array<{ value: Tab; label: string; icon: string }> = [
+    { value: "overview", label: "Overview", icon: "badge" },
+    { value: "household", label: "Household", icon: "family_restroom" },
+    { value: "giving", label: "Giving", icon: "volunteer_activism" },
+    ...(canSeeNotes ? [{ value: "notes" as Tab, label: "Pastoral notes", icon: "lock" }] : []),
+  ];
+
+  const addressLine = [member.address, [member.city, member.state].filter(Boolean).join(", "), member.postal_code, member.country]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
-    <div className="w-full max-w-[1440px] mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col gap-6">
-      {/* ── Breadcrumb & Meta Bar ── */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-on-surface-variant text-sm">
-          <Link href="/dashboard/members" className="hover:text-primary transition-colors flex items-center gap-1">
-            <span className="material-symbols-outlined text-[16px]">people</span>
-            <span>Directory</span>
-          </Link>
-          <span className="text-outline-variant">/</span>
-          <span className="text-on-surface font-semibold">{displayName}</span>
-          <span className="text-outline-variant">•</span>
-          <span className="px-2 py-0.5 rounded-full bg-surface-container-high text-primary text-xs font-medium">
-            ID #REC-{member?.id ? member.id.slice(0, 6) : "8049"}
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="flex items-center gap-1.5 text-xs font-semibold text-tertiary bg-tertiary-fixed/40 px-3 py-1 rounded-full">
-            <span className="w-2 h-2 rounded-full bg-tertiary animate-pulse"></span>
-            Checked In This Sunday (9:30 AM Service)
-          </span>
-        </div>
-      </div>
-
-      {/* ── Header Section Card ── */}
-      <div className="bg-surface-container-lowest rounded-xl shadow-sm p-6 relative overflow-hidden">
-        {/* Ambient decorative gradient wash */}
-        <div className="absolute -right-24 -top-24 w-96 h-96 rounded-full bg-gradient-to-br from-primary-fixed/30 to-surface-container-high/40 blur-3xl pointer-events-none"></div>
-
-        <div className="relative z-10 flex flex-col lg:flex-row lg:items-center justify-between gap-6">
-          {/* Identity Group */}
-          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-5">
-            {/* Avatar with Online/Active Badge */}
-            <div className="relative flex-shrink-0">
-              <img
-                className="w-24 h-24 sm:w-28 sm:h-28 rounded-full object-cover shadow-sm bg-surface-container-high"
-                src={
-                  member?.photo ||
-                  "https://lh3.googleusercontent.com/aida-public/AB6AXuDywSpo0Yd1s8U0enVlimDoSOfGNxshvHFUIpGOzdaoFEhDBuUXfkQeki8AcNOktH5LyCZ2e8xzMfceUypz_Y5UzA-C9ZZmhkSo_tnDZTThiddeAdoGMCEsXahCtYSau0g_-5TGzN71ddWwWrGpIP7AQQNOp1gwDFZC-ppw9XwMTOzAUrm7fwBM2yEllN3FXHEJ4x3n9cmPSDQdYBCTMiPlgHruqedeMrZ0v8Nxh_Wi1JUURWGGULDs8Q"
-                }
-                alt={displayName}
-              />
-              <span
-                className="absolute bottom-1 right-1 w-6 h-6 rounded-full bg-tertiary-fixed text-on-tertiary-fixed flex items-center justify-center shadow-sm"
-                title="Active congregant"
-              >
-                <span className="material-symbols-outlined text-[14px]">check</span>
-              </span>
-            </div>
-
-            {/* Name, Family & Meta Row */}
-            <div className="flex flex-col min-w-0">
-              <div className="flex flex-wrap items-center gap-3 mb-1.5">
-                <h1 className="text-2xl sm:text-3xl font-bold text-on-surface tracking-tight">{displayName}</h1>
-                {/* Badges */}
-                <div className="flex flex-wrap gap-1.5">
-                  <span className="px-2.5 py-0.5 rounded-full bg-surface-container-high text-primary text-xs font-semibold flex items-center gap-1">
-                    <span className="material-symbols-outlined text-[14px]">verified</span>
-                    Active Member
+    <div className="flex flex-col gap-6">
+      {/* ── Identity header ──────────────────────────────────────────── */}
+      <Card className="p-5 sm:p-6">
+        <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-start gap-4">
+            <Avatar name={member.full_name} initials={initials(member.first_name, member.last_name)} src={member.photo} size={64} />
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="text-2xl font-semibold tracking-tight text-ink">{member.full_name}</h1>
+                <MemberStatusBadge status={member.status} />
+              </div>
+              {member.preferred_name && <p className="text-sm text-ink-muted">Goes by “{member.preferred_name}”</p>}
+              <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] text-ink-muted">
+                {member.life_stage && (
+                  <span className="inline-flex items-center gap-1">
+                    <Icon name="person" size={16} />
+                    {labelFor(LIFE_STAGES, member.life_stage)}
+                    {member.age !== null ? `, ${member.age} yrs` : ""}
                   </span>
-                  <span className="px-2.5 py-0.5 rounded-full bg-secondary-fixed/50 text-secondary text-xs font-semibold flex items-center gap-1">
-                    <span className="material-symbols-outlined text-[14px]">family_restroom</span>
-                    {member?.family_name || "Sterling Family"} (Head of Household)
+                )}
+                {member.family && (
+                  <span className="inline-flex items-center gap-1">
+                    <Icon name="family_restroom" size={16} />
+                    {member.family.name}
                   </span>
-                </div>
-              </div>
-
-              {/* Key Stats Meta Row */}
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-on-surface-variant text-sm">
-                <span className="flex items-center gap-1">
-                  <span className="material-symbols-outlined text-[16px] text-primary">calendar_month</span>
-                  Member since <strong className="font-semibold text-on-surface">Oct 2021</strong> (4 years)
-                </span>
-                <span className="text-outline-variant font-bold">•</span>
-                <span className="flex items-center gap-1">
-                  <span className="material-symbols-outlined text-[16px] text-secondary">mail</span>
-                  Envelope <strong className="font-semibold text-on-surface">#1084</strong>
-                </span>
-                <span className="text-outline-variant font-bold">•</span>
-                <span className="flex items-center gap-1">
-                  <span className="material-symbols-outlined text-[16px] text-primary">water_drop</span>
-                  Baptized <strong className="font-semibold text-on-surface">Apr 14, 2018</strong>
-                </span>
-                <span className="text-outline-variant font-bold">•</span>
-                <span>
-                  Age <strong className="font-semibold text-on-surface">{member?.age || "38"}</strong>
-                </span>
-              </div>
-            </div>
-          </div>
-
-          {/* Quick Action Buttons */}
-          <div className="flex flex-wrap items-center gap-2 self-start lg:self-center">
-            <a
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-surface-container text-on-surface text-sm font-semibold hover:bg-surface-container-high transition-colors shadow-sm"
-              href={`tel:${member?.phone_mobile || "5552348901"}`}
-            >
-              <span className="material-symbols-outlined text-[18px] text-primary">call</span>
-              <span>{member?.phone_mobile || "(555) 234-8901"}</span>
-            </a>
-            <Link
-              href="/dashboard/communications"
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-surface-container text-on-surface text-sm font-semibold hover:bg-surface-container-high transition-colors shadow-sm"
-            >
-              <span className="material-symbols-outlined text-[18px] text-secondary">chat</span>
-              <span>Message</span>
-            </Link>
-            <button
-              onClick={() => {
-                setActiveTab("notes");
-                setShowAddNoteModal(true);
-              }}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-primary-container text-on-primary text-sm font-semibold hover:opacity-95 transition-opacity shadow-sm"
-              type="button"
-            >
-              <span className="material-symbols-outlined text-[18px]">volunteer_activism</span>
-              <span>Log Pastoral Care</span>
-            </button>
-            <button
-              onClick={openEditModal}
-              className="p-2 rounded-lg bg-surface-container text-on-surface hover:bg-surface-container-high transition-colors flex items-center justify-center"
-              title="Edit Congregant Profile"
-              type="button"
-            >
-              <span className="material-symbols-outlined text-[18px]">edit</span>
-            </button>
-            <button
-              onClick={() => setShowDeleteConfirm(true)}
-              className="p-2 rounded-lg bg-error-container/20 text-error hover:bg-error-container/40 transition-colors flex items-center justify-center"
-              title="Delete Congregant Profile"
-              type="button"
-            >
-              <span className="material-symbols-outlined text-[18px]">delete</span>
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* ── Horizontal Navigation Tabs ── */}
-      <div className="bg-surface-container-lowest rounded-xl shadow-sm px-4 py-1 overflow-x-auto flex items-center gap-1">
-        {[
-          { key: "overview", label: "Overview", icon: "dashboard" },
-          { key: "family", label: "Family", badge: "4" },
-          { key: "groups", label: "Groups & Ministries", badge: "2" },
-          { key: "attendance", label: "Attendance History" },
-          { key: "giving", label: "Giving Records" },
-          { key: "notes", label: "Pastoral Notes", badge: "3", badgeColor: "bg-secondary-fixed text-on-secondary-fixed" },
-          { key: "comms", label: "Communication Log" },
-        ].map((tab) => {
-          const isActive = activeTab === tab.key;
-          return (
-            <button
-              key={tab.key}
-              onClick={() => setActiveTab(tab.key as TabKey)}
-              className={`px-4 py-2.5 rounded-lg text-sm font-semibold whitespace-nowrap flex items-center gap-2 transition-all ${
-                isActive
-                  ? "bg-primary text-on-primary shadow-sm"
-                  : "text-on-surface-variant hover:text-on-surface hover:bg-surface-container"
-              }`}
-              type="button"
-            >
-              {tab.icon && <span className="material-symbols-outlined text-[16px]">{tab.icon}</span>}
-              <span>{tab.label}</span>
-              {tab.badge && (
-                <span
-                  className={`px-1.5 py-0.2 rounded-full text-xs font-semibold ${
-                    tab.badgeColor || (isActive ? "bg-white/20 text-white" : "bg-surface-container-high text-primary")
-                  }`}
-                >
-                  {tab.badge}
-                </span>
-              )}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* ── Main Content Area: Overview Tab 3-Column Grid ── */}
-      {activeTab === "overview" && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-          {/* ================= LEFT COLUMN: Width 4/12 ================= */}
-          <div className="lg:col-span-4 flex flex-col gap-6">
-            {/* Personal Information Card */}
-            <div className="bg-surface-container-lowest rounded-xl shadow-sm p-6 flex flex-col gap-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="w-8 h-8 rounded-full bg-primary-fixed/50 text-primary flex items-center justify-center">
-                    <span className="material-symbols-outlined text-[18px]">badge</span>
+                )}
+                {member.membership_date && (
+                  <span className="inline-flex items-center gap-1">
+                    <Icon name="calendar_month" size={16} />
+                    Member since {formatDate(member.membership_date, { month: "short", year: "numeric" })}
                   </span>
-                  <h2 className="text-lg font-semibold text-on-surface">Personal Information</h2>
-                </div>
-                <button className="text-primary hover:text-primary-container text-xs font-semibold" type="button">
-                  Edit
-                </button>
-              </div>
-
-              <div className="flex flex-col gap-3 text-sm">
-                <div className="p-3 bg-surface-container-low rounded-lg flex items-start gap-3">
-                  <span className="material-symbols-outlined text-outline text-[20px] mt-0.5">mail</span>
-                  <div className="flex flex-col min-w-0">
-                    <span className="text-[11px] text-outline uppercase tracking-wider font-semibold">Email Address</span>
-                    <a className="text-primary font-semibold truncate hover:underline" href={`mailto:${member?.email || "m.sterling@email.com"}`}>
-                      {member?.email || "m.sterling@email.com"}
-                    </a>
-                  </div>
-                </div>
-
-                <div className="p-3 bg-surface-container-low rounded-lg flex items-start gap-3">
-                  <span className="material-symbols-outlined text-outline text-[20px] mt-0.5">smartphone</span>
-                  <div className="flex flex-col min-w-0">
-                    <span className="text-[11px] text-outline uppercase tracking-wider font-semibold">Mobile Phone</span>
-                    <span className="text-on-surface font-semibold">{member?.phone_mobile || "(555) 234-8901"}</span>
-                  </div>
-                </div>
-
-                <div className="p-3 bg-surface-container-low rounded-lg flex items-start gap-3">
-                  <span className="material-symbols-outlined text-outline text-[20px] mt-0.5">home_pin</span>
-                  <div className="flex flex-col min-w-0">
-                    <span className="text-[11px] text-outline uppercase tracking-wider font-semibold">Home Address</span>
-                    <span className="text-on-surface font-semibold">742 Evergreen Terrace</span>
-                    <span className="text-on-surface-variant text-xs">Springfield, OR 97477</span>
-                  </div>
-                </div>
-
-                <div className="p-3 bg-surface-container-low rounded-lg flex items-start gap-3">
-                  <span className="material-symbols-outlined text-outline text-[20px] mt-0.5">work</span>
-                  <div className="flex flex-col min-w-0">
-                    <span className="text-[11px] text-outline uppercase tracking-wider font-semibold">Occupation</span>
-                    <span className="text-on-surface font-semibold">Software Architect</span>
-                    <span className="text-on-surface-variant text-xs">Northwest Cloud Labs</span>
-                  </div>
-                </div>
-
-                <div className="p-3 bg-surface-container-low rounded-lg flex items-start gap-3">
-                  <span className="material-symbols-outlined text-outline text-[20px] mt-0.5">favorite</span>
-                  <div className="flex flex-col min-w-0">
-                    <span className="text-[11px] text-outline uppercase tracking-wider font-semibold">Marital Status</span>
-                    <span className="text-on-surface font-semibold">Married to Elena Sterling</span>
-                    <span className="text-on-surface-variant text-xs">12 years (Anniversary: June 18)</span>
-                  </div>
-                </div>
-
-                <div className="p-3 bg-error-container/40 rounded-lg flex items-start gap-3">
-                  <span className="material-symbols-outlined text-error text-[20px] mt-0.5">contact_emergency</span>
-                  <div className="flex flex-col min-w-0">
-                    <span className="text-[11px] text-error font-semibold uppercase tracking-wider">Emergency Contact</span>
-                    <span className="text-on-surface font-semibold">Elena Sterling (Spouse)</span>
-                    <span className="text-on-surface-variant text-xs">(555) 234-8902</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Family Unit Mini Card */}
-            <div className="bg-surface-container-lowest rounded-xl shadow-sm p-6 flex flex-col gap-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="w-8 h-8 rounded-full bg-secondary-fixed/50 text-secondary flex items-center justify-center">
-                    <span className="material-symbols-outlined text-[18px]">diversity_1</span>
-                  </span>
-                  <h2 className="text-lg font-semibold text-on-surface">Family Unit (4)</h2>
-                </div>
-                <span className="text-xs px-2 py-0.5 rounded bg-surface-container-high text-primary font-semibold">
-                  Household #412
-                </span>
-              </div>
-
-              <div className="flex flex-col gap-2.5">
-                {/* Elena */}
-                <div className="p-3 bg-surface-container-low hover:bg-surface-container transition-colors rounded-lg flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <img
-                      className="w-10 h-10 rounded-full object-cover bg-surface-container-high flex-shrink-0"
-                      src="https://lh3.googleusercontent.com/aida-public/AB6AXuBAmLFSo3m8wa8XKilW15tbNRIWlFtsLCpt43Djp2xfyD6CSSL6DV0Tnf6BvlxdDmx8osJZEa5Dq-6C_OMYUA94R5OLgsnMb0w6l1vzaJPNnM1-MeGj5Cs2nWn8uySjN60YqvCZlF2FR7V2IX2mfQDonEfs728iILVcwkrqfy1OjuuSe0sj6vXY5mkohld1mlQWRK_DeiS5PeRc4woAGTmUl6Z1Vixo1MeKl1Y70cSS32damSxa6j573g"
-                      alt="Elena Sterling"
-                    />
-                    <div className="flex flex-col min-w-0">
-                      <span className="text-sm font-semibold text-on-surface truncate">Elena Sterling</span>
-                      <span className="text-xs text-outline">Spouse • Adult Choir Member</span>
-                    </div>
-                  </div>
-                  <span className="px-2 py-0.5 rounded-full bg-surface-container text-on-surface text-xs font-medium flex-shrink-0">
-                    Adult
-                  </span>
-                </div>
-
-                {/* Leo */}
-                <div className="p-3 bg-surface-container-low hover:bg-surface-container transition-colors rounded-lg flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <img
-                      className="w-10 h-10 rounded-full object-cover bg-surface-container-high flex-shrink-0"
-                      src="https://lh3.googleusercontent.com/aida-public/AB6AXuCr8pfh0NKD0_9DePYXU-X0uZXXmkG_cfAEV2c3ICxvdWcMOTa0rdzfIAJQURgou7njSkm0WWrjiZkeTxfP8wtT-JXabE90LWBIoAvtypQq7J86rE8JTmdLucG-HMB-Ip_sK4HH1gyAQjJf5TIx9hLYeuI13GBVRulk4fBtaBd1tub6QGx9pjdpnUugNvG1LL1l_q5h2sykQlDC9jOzWxUpiBHJxkbkjUbIhtMLDaZATWVuKXf8k6SyrA"
-                      alt="Leo Sterling"
-                    />
-                    <div className="flex flex-col min-w-0">
-                      <span className="text-sm font-semibold text-on-surface truncate">Leo Sterling</span>
-                      <span className="text-xs text-outline">Son • Age 8 • Sunday School (Grades 3-4)</span>
-                    </div>
-                  </div>
-                  <span className="px-2 py-0.5 rounded-full bg-tertiary-fixed text-on-tertiary-fixed text-xs font-semibold flex-shrink-0">
-                    Checked In
-                  </span>
-                </div>
-
-                {/* Maya */}
-                <div className="p-3 bg-surface-container-low hover:bg-surface-container transition-colors rounded-lg flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <img
-                      className="w-10 h-10 rounded-full object-cover bg-surface-container-high flex-shrink-0"
-                      src="https://lh3.googleusercontent.com/aida-public/AB6AXuDBuZmgmLYtCR0KAF2zLF3oR282qOWy-XL9nVyVL98r1Y4qilET1kMLdB4eIoeDlEard9ldl6wwaYvlloAlu2JNZM9PACiBtFYfYi5JcLjnqQA_4-4wRrXXZts1VxJiBilCvacXJCu66_JhHuaU9KKzU9rP7OQfnuwqcwX9LFvoaydrKjKwMtgD5lB7ZNE_AMTsjkoq6mfAwCPxUWtRacRcTl2gmPi68TQjEg_FgJIOdz6JfKAw17-1MQ"
-                      alt="Maya Sterling"
-                    />
-                    <div className="flex flex-col min-w-0">
-                      <span className="text-sm font-semibold text-on-surface truncate">Maya Sterling</span>
-                      <span className="text-xs text-outline">Daughter • Age 5 • Sunday School (Kinder)</span>
-                    </div>
-                  </div>
-                  <span className="px-2 py-0.5 rounded-full bg-tertiary-fixed text-on-tertiary-fixed text-xs font-semibold flex-shrink-0">
-                    Checked In
-                  </span>
-                </div>
-              </div>
-
-              <button
-                className="inline-flex items-center justify-center gap-1.5 py-2 rounded-lg bg-surface-container text-on-surface text-sm font-semibold hover:bg-surface-container-high transition-colors"
-                type="button"
-              >
-                <span className="material-symbols-outlined text-[16px]">manage_accounts</span>
-                <span>Manage Household Record</span>
-              </button>
-            </div>
-          </div>
-
-          {/* ================= MIDDLE COLUMN: Width 5/12 ================= */}
-          <div className="lg:col-span-5 flex flex-col gap-6">
-            {/* Attendance Rhythm Card */}
-            <div className="bg-surface-container-lowest rounded-xl shadow-sm p-6 flex flex-col gap-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="w-8 h-8 rounded-full bg-tertiary-fixed/50 text-tertiary flex items-center justify-center">
-                    <span className="material-symbols-outlined text-[18px]">insights</span>
-                  </span>
-                  <div>
-                    <h2 className="text-lg font-semibold text-on-surface">Attendance Rhythm</h2>
-                    <span className="text-xs text-outline">Rolling last 12 weeks evaluation</span>
-                  </div>
-                </div>
-                <span className="px-2.5 py-1 rounded-full bg-tertiary-fixed text-on-tertiary-fixed text-xs font-semibold flex items-center gap-1">
-                  <span className="material-symbols-outlined text-[14px]">trending_up</span>
-                  83% Consistency
-                </span>
-              </div>
-
-              {/* Top stats */}
-              <div className="grid grid-cols-3 gap-2">
-                <div className="bg-surface-container-low p-3 rounded-lg flex flex-col">
-                  <span className="text-2xl font-bold text-primary leading-none">
-                    10<span className="text-xs font-normal text-outline">/12</span>
-                  </span>
-                  <span className="text-xs text-outline mt-1 font-medium">Sundays Present</span>
-                </div>
-                <div className="bg-surface-container-low p-3 rounded-lg flex flex-col">
-                  <span className="text-2xl font-bold text-secondary leading-none">
-                    11<span className="text-xs font-normal text-outline">/12</span>
-                  </span>
-                  <span className="text-xs text-outline mt-1 font-medium">Kids Checked-in</span>
-                </div>
-                <div className="bg-surface-container-low p-3 rounded-lg flex flex-col">
-                  <span className="text-2xl font-bold text-tertiary leading-none">
-                    7<span className="text-xs font-normal text-outline"> wks</span>
-                  </span>
-                  <span className="text-xs text-outline mt-1 font-medium">Small Group Streak</span>
-                </div>
-              </div>
-
-              {/* 12-Week Matrix */}
-              <div className="bg-surface-container-low p-4 rounded-lg flex flex-col gap-2">
-                <div className="flex items-center justify-between text-outline text-[11px] font-semibold uppercase tracking-wider">
-                  <span>Wk 1 (Jul)</span>
-                  <span>Wk 6</span>
-                  <span>Wk 12 (Current)</span>
-                </div>
-                <div className="grid grid-cols-12 gap-1.5 h-16 items-end pt-2">
-                  {[
-                    { w: 1, attended: true, h: "h-12" },
-                    { w: 2, attended: true, h: "h-12" },
-                    { w: 3, attended: false, h: "h-3", note: "Family Vacation" },
-                    { w: 4, attended: true, h: "h-12" },
-                    { w: 5, attended: true, h: "h-12" },
-                    { w: 6, attended: true, h: "h-12" },
-                    { w: 7, attended: false, h: "h-3", note: "Work Travel" },
-                    { w: 8, attended: true, h: "h-12" },
-                    { w: 9, attended: true, h: "h-12" },
-                    { w: 10, attended: true, h: "h-12" },
-                    { w: 11, attended: true, h: "h-12" },
-                    { w: 12, attended: true, h: "h-14", isNow: true },
-                  ].map((bar) => (
-                    <div key={bar.w} className="flex flex-col items-center gap-1 group relative">
-                      <div
-                        className={`w-full rounded-t transition-all ${
-                          bar.isNow
-                            ? "bg-tertiary-container ring-2 ring-tertiary-fixed shadow-sm"
-                            : bar.attended
-                            ? "bg-primary group-hover:opacity-80"
-                            : "bg-outline-variant/50"
-                        } ${bar.h}`}
-                        title={bar.isNow ? "Present (Today)" : bar.attended ? `Week ${bar.w}: Present` : `Absent: ${bar.note}`}
-                      />
-                      <span
-                        className={`text-[10px] ${
-                          bar.isNow ? "font-bold text-tertiary" : "text-outline"
-                        }`}
-                      >
-                        {bar.isNow ? "Now" : bar.w}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-                <div className="flex items-center justify-between pt-2 text-xs text-on-surface-variant border-t border-surface-container">
-                  <span className="flex items-center gap-1.5">
-                    <span className="w-2.5 h-2.5 rounded-sm bg-primary"></span> TLPCI Sunday Service
-                  </span>
-                  <span className="flex items-center gap-1.5">
-                    <span className="w-2.5 h-2.5 rounded-sm bg-tertiary-container"></span> Present Today
-                  </span>
-                  <span className="flex items-center gap-1.5">
-                    <span className="w-2.5 h-2.5 rounded-sm bg-outline-variant/60"></span> Missed
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {/* Milestones Timeline Card */}
-            <div className="bg-surface-container-lowest rounded-xl shadow-sm p-6 flex flex-col gap-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="w-8 h-8 rounded-full bg-primary-fixed/50 text-primary flex items-center justify-center">
-                    <span className="material-symbols-outlined text-[18px]">history_edu</span>
-                  </span>
-                  <h2 className="text-lg font-semibold text-on-surface">Milestones Timeline</h2>
-                </div>
-                <button className="text-primary hover:text-primary-container text-xs font-semibold flex items-center gap-0.5" type="button">
-                  <span className="material-symbols-outlined text-[16px]">add</span> Add
-                </button>
-              </div>
-
-              {/* Chronological items with continuous line */}
-              <div className="relative pl-6 flex flex-col gap-4">
-                <div className="absolute left-2.5 top-2 bottom-2 w-0.5 bg-surface-container-highest"></div>
-
-                {/* Milestone 1 */}
-                <div className="relative flex items-start gap-3">
-                  <div className="absolute -left-6 top-1 w-5 h-5 rounded-full bg-primary text-on-primary flex items-center justify-center ring-4 ring-surface-container-lowest">
-                    <span className="material-symbols-outlined text-[12px]">group</span>
-                  </div>
-                  <div className="flex flex-col bg-surface-container-low p-3 rounded-lg w-full">
-                    <div className="flex items-center justify-between mb-0.5">
-                      <span className="text-sm font-semibold text-on-surface">Appointed Small Group Co-Leader</span>
-                      <span className="text-xs text-outline font-medium">Oct 2025</span>
-                    </div>
-                    <p className="text-xs text-on-surface-variant">Confirmed by Pastoral Leadership Council for West End community fellowship.</p>
-                  </div>
-                </div>
-
-                {/* Milestone 2 */}
-                <div className="relative flex items-start gap-3">
-                  <div className="absolute -left-6 top-1 w-5 h-5 rounded-full bg-secondary text-on-secondary flex items-center justify-center ring-4 ring-surface-container-lowest">
-                    <span className="material-symbols-outlined text-[12px]">school</span>
-                  </div>
-                  <div className="flex flex-col bg-surface-container-low p-3 rounded-lg w-full">
-                    <div className="flex items-center justify-between mb-0.5">
-                      <span className="text-sm font-semibold text-on-surface">Completed Discipleship Track 201</span>
-                      <span className="text-xs text-outline font-medium">Nov 2023</span>
-                    </div>
-                    <p className="text-xs text-on-surface-variant">8-week intensive biblical stewardship &amp; spiritual leadership program.</p>
-                  </div>
-                </div>
-
-                {/* Milestone 3 */}
-                <div className="relative flex items-start gap-3">
-                  <div className="absolute -left-6 top-1 w-5 h-5 rounded-full bg-primary-container text-on-primary flex items-center justify-center ring-4 ring-surface-container-lowest">
-                    <span className="material-symbols-outlined text-[12px]">loyalty</span>
-                  </div>
-                  <div className="flex flex-col bg-surface-container-low p-3 rounded-lg w-full">
-                    <div className="flex items-center justify-between mb-0.5">
-                      <span className="text-sm font-semibold text-on-surface">Formal Membership Covenant Signed</span>
-                      <span className="text-xs text-outline font-medium">Oct 2021</span>
-                    </div>
-                    <p className="text-xs text-on-surface-variant">Welcomed into full church covenant by the TLPCI Board of Elders.</p>
-                  </div>
-                </div>
-
-                {/* Milestone 4 */}
-                <div className="relative flex items-start gap-3">
-                  <div className="absolute -left-6 top-1 w-5 h-5 rounded-full bg-tertiary text-on-tertiary flex items-center justify-center ring-4 ring-surface-container-lowest">
-                    <span className="material-symbols-outlined text-[12px]">water_drop</span>
-                  </div>
-                  <div className="flex flex-col bg-surface-container-low p-3 rounded-lg w-full">
-                    <div className="flex items-center justify-between mb-0.5">
-                      <span className="text-sm font-semibold text-on-surface">Water Baptism by Senior Pastor</span>
-                      <span className="text-xs text-outline font-medium">Apr 14, 2018</span>
-                    </div>
-                    <p className="text-xs text-on-surface-variant">Easter Sunday service baptism certificate #BAP-2018-044.</p>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Active Groups & Ministries Card */}
-            <div className="bg-surface-container-lowest rounded-xl shadow-sm p-6 flex flex-col gap-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="w-8 h-8 rounded-full bg-primary-fixed/50 text-primary flex items-center justify-center">
-                    <span className="material-symbols-outlined text-[18px]">groups_3</span>
-                  </span>
-                  <h2 className="text-lg font-semibold text-on-surface">Active Groups &amp; Ministries</h2>
-                </div>
-                <Link href="/dashboard/groups" className="text-xs font-semibold text-primary hover:underline">
-                  View All
-                </Link>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {/* Group 1 */}
-                <div className="bg-surface-container-low p-4 rounded-lg flex flex-col justify-between gap-3 hover:bg-surface-container transition-colors">
-                  <div className="flex flex-col">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="px-2 py-0.5 rounded-full bg-primary-container text-on-primary text-[11px] font-bold">
-                        Leader
-                      </span>
-                      <span className="text-outline text-xs">18 Members</span>
-                    </div>
-                    <h3 className="text-sm font-semibold text-on-surface">Men's Fellowship</h3>
-                    <p className="text-xs text-on-surface-variant line-clamp-2 mt-0.5">
-                      Saturday bi-weekly breakfast study &amp; mentoring outreach.
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-1.5 text-outline text-xs">
-                    <span className="material-symbols-outlined text-[14px]">schedule</span>
-                    <span>Sat • 7:30 AM • Chapel Room B</span>
-                  </div>
-                </div>
-
-                {/* Group 2 */}
-                <div className="bg-surface-container-low p-4 rounded-lg flex flex-col justify-between gap-3 hover:bg-surface-container transition-colors">
-                  <div className="flex flex-col">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="px-2 py-0.5 rounded-full bg-secondary-fixed text-on-secondary-fixed text-[11px] font-bold">
-                        Co-Leader
-                      </span>
-                      <span className="text-outline text-xs">12 Adults</span>
-                    </div>
-                    <h3 className="text-sm font-semibold text-on-surface">West End Small Group</h3>
-                    <p className="text-xs text-on-surface-variant line-clamp-2 mt-0.5">
-                      Weekly neighborhood gathering for Bible study and family support.
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-1.5 text-outline text-xs">
-                    <span className="material-symbols-outlined text-[14px]">schedule</span>
-                    <span>Wed • 7:00 PM • Rotates Homes</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* ================= RIGHT COLUMN: Width 3/12 ================= */}
-          <div className="lg:col-span-3 flex flex-col gap-6">
-            {/* Pastoral Notes & Follow-up Card */}
-            <div className="bg-surface-container-lowest rounded-xl shadow-sm p-6 flex flex-col gap-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="w-8 h-8 rounded-full bg-secondary-fixed/50 text-secondary flex items-center justify-center">
-                    <span className="material-symbols-outlined text-[18px]">note_alt</span>
-                  </span>
-                  <h2 className="text-lg font-semibold text-on-surface">Pastoral Notes</h2>
-                </div>
-                <span className="w-5 h-5 rounded-full bg-secondary-fixed text-on-secondary-fixed text-xs flex items-center justify-center font-bold">
-                  {notesList.length}
-                </span>
-              </div>
-
-              {/* + Add Note Quick Input Button */}
-              <button
-                onClick={() => setShowAddNoteModal(true)}
-                className="w-full flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-lg bg-surface-container text-primary text-sm font-semibold hover:bg-surface-container-high transition-colors shadow-sm"
-                type="button"
-              >
-                <span className="material-symbols-outlined text-[18px]">add_circle</span>
-                <span>+ Add Note</span>
-              </button>
-
-              {/* Note Items Stack */}
-              <div className="flex flex-col gap-3">
-                {notesList.map((note) => (
-                  <div key={note.id} className="bg-surface-container-low p-3 rounded-lg flex flex-col gap-2">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <div
-                          className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold"
-                          style={{ background: note.avatarBg, color: note.avatarColor }}
-                        >
-                          {note.initials}
-                        </div>
-                        <span className="text-xs font-semibold text-on-surface">{note.author}</span>
-                      </div>
-                      <span className="text-[11px] text-outline">{note.date}</span>
-                    </div>
-                    <p className="text-xs text-on-surface leading-snug">{note.text}</p>
-                    {note.status && (
-                      <div className="flex items-center gap-1 text-[11px] text-tertiary font-medium">
-                        <span className="material-symbols-outlined text-[14px]">check_circle</span>
-                        <span>{note.status}</span>
-                      </div>
-                    )}
-                    {note.tag && <span className="text-[11px] text-outline font-medium">{note.tag}</span>}
-                  </div>
-                ))}
-              </div>
-
-              <button
-                onClick={() => setActiveTab("notes")}
-                className="text-xs font-semibold text-primary text-center hover:underline pt-1"
-                type="button"
-              >
-                View Complete Pastoral History
-              </button>
-            </div>
-
-            {/* Giving Summary (Finance Preview) Card */}
-            <div className="bg-surface-container-lowest rounded-xl shadow-sm p-6 flex flex-col gap-4 relative overflow-hidden">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="w-8 h-8 rounded-full bg-tertiary-fixed/50 text-tertiary flex items-center justify-center">
-                    <span className="material-symbols-outlined text-[18px]">payments</span>
-                  </span>
-                  <h2 className="text-lg font-semibold text-on-surface">Giving Summary</h2>
-                </div>
-                <span className="material-symbols-outlined text-outline text-[20px]">lock</span>
-              </div>
-
-              {/* Highlight Pill */}
-              <div className="bg-tertiary-fixed/30 text-on-tertiary-fixed-variant px-3 py-2 rounded-lg flex items-center gap-2.5">
-                <span className="material-symbols-outlined text-[20px] text-tertiary">workspace_premium</span>
-                <div className="flex flex-col">
-                  <span className="text-xs font-bold">Consistent Monthly Giver</span>
-                  <span className="text-[11px] text-outline">Recurring gift active via ACH</span>
-                </div>
-              </div>
-
-              {/* YTD Total Display */}
-              <div className="bg-surface-container-low p-4 rounded-lg flex flex-col">
-                <span className="text-[11px] text-outline uppercase tracking-wider font-semibold">
-                  YTD Total Giving (2025)
-                </span>
-                <div className="flex items-baseline gap-2 mt-1">
-                  <span className="text-3xl text-on-surface font-bold tracking-tight">$4,200</span>
-                  <span className="text-xs text-tertiary font-semibold flex items-center">
-                    <span className="material-symbols-outlined text-[14px]">north_east</span> on pace
-                  </span>
-                </div>
-
-                {/* Visual Bar Distribution */}
-                <div className="w-full h-2.5 rounded-full bg-surface-container-high overflow-hidden flex mt-3">
-                  <div className="bg-primary h-full w-[85%]" title="Regular Tithe: $3,600 (85.7%)"></div>
-                  <div className="bg-secondary-container h-full w-[15%]" title="Building Fund: $600 (14.3%)"></div>
-                </div>
-
-                {/* Breakdown rows */}
-                <div className="flex flex-col gap-1.5 mt-3 text-xs">
-                  <div className="flex items-center justify-between">
-                    <span className="flex items-center gap-1.5 text-on-surface-variant">
-                      <span className="w-2.5 h-2.5 rounded-full bg-primary"></span>
-                      <span>Regular Tithe</span>
-                    </span>
-                    <span className="font-semibold text-on-surface">$3,600.00</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="flex items-center gap-1.5 text-on-surface-variant">
-                      <span className="w-2.5 h-2.5 rounded-full bg-secondary-container"></span>
-                      <span>Building Fund</span>
-                    </span>
-                    <span className="font-semibold text-on-surface">$600.00</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-2">
-                <Link
-                  href="/dashboard/finance"
-                  className="w-full py-2 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface text-xs font-semibold transition-colors text-center shadow-sm"
-                >
-                  View Tax Statements &amp; Ledger
-                </Link>
-                <span className="text-center text-[11px] text-outline">Privileged Pastor/Finance Access Only</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Additional Tab Views (when not on overview) ── */}
-      {activeTab === "family" && (
-        <div className="bg-surface-container-lowest rounded-xl shadow-sm p-6 flex flex-col gap-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-xl font-bold text-on-surface">Sterling Family Unit</h2>
-              <p className="text-sm text-on-surface-variant">Household ID #412 • 4 Members registered</p>
-            </div>
-            <button className="px-4 py-2 bg-primary text-on-primary rounded-lg text-sm font-semibold shadow-sm">
-              + Add Family Member
-            </button>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {[
-              { name: "Marcus Sterling", role: "Head of Household", age: 38, email: "m.sterling@email.com", img: "https://lh3.googleusercontent.com/aida-public/AB6AXuDywSpo0Yd1s8U0enVlimDoSOfGNxshvHFUIpGOzdaoFEhDBuUXfkQeki8AcNOktH5LyCZ2e8xzMfceUypz_Y5UzA-C9ZZmhkSo_tnDZTThiddeAdoGMCEsXahCtYSau0g_-5TGzN71ddWwWrGpIP7AQQNOp1gwDFZC-ppw9XwMTOzAUrm7fwBM2yEllN3FXHEJ4x3n9cmPSDQdYBCTMiPlgHruqedeMrZ0v8Nxh_Wi1JUURWGGULDs8Q" },
-              { name: "Elena Sterling", role: "Spouse", age: 36, email: "elena.s@email.com", img: "https://lh3.googleusercontent.com/aida-public/AB6AXuBAmLFSo3m8wa8XKilW15tbNRIWlFtsLCpt43Djp2xfyD6CSSL6DV0Tnf6BvlxdDmx8osJZEa5Dq-6C_OMYUA94R5OLgsnMb0w6l1vzaJPNnM1-MeGj5Cs2nWn8uySjN60YqvCZlF2FR7V2IX2mfQDonEfs728iILVcwkrqfy1OjuuSe0sj6vXY5mkohld1mlQWRK_DeiS5PeRc4woAGTmUl6Z1Vixo1MeKl1Y70cSS32damSxa6j573g" },
-              { name: "Leo Sterling", role: "Child (Grade 3-4)", age: 8, email: "Parent managed", img: "https://lh3.googleusercontent.com/aida-public/AB6AXuCr8pfh0NKD0_9DePYXU-X0uZXXmkG_cfAEV2c3ICxvdWcMOTa0rdzfIAJQURgou7njSkm0WWrjiZkeTxfP8wtT-JXabE90LWBIoAvtypQq7J86rE8JTmdLucG-HMB-Ip_sK4HH1gyAQjJf5TIx9hLYeuI13GBVRulk4fBtaBd1tub6QGx9pjdpnUugNvG1LL1l_q5h2sykQlDC9jOzWxUpiBHJxkbkjUbIhtMLDaZATWVuKXf8k6SyrA" },
-              { name: "Maya Sterling", role: "Child (Kinder)", age: 5, email: "Parent managed", img: "https://lh3.googleusercontent.com/aida-public/AB6AXuDBuZmgmLYtCR0KAF2zLF3oR282qOWy-XL9nVyVL98r1Y4qilET1kMLdB4eIoeDlEard9ldl6wwaYvlloAlu2JNZM9PACiBtFYfYi5JcLjnqQA_4-4wRrXXZts1VxJiBilCvacXJCu66_JhHuaU9KKzU9rP7OQfnuwqcwX9LFvoaydrKjKwMtgD5lB7ZNE_AMTsjkoq6mfAwCPxUWtRacRcTl2gmPi68TQjEg_FgJIOdz6JfKAw17-1MQ" },
-            ].map((f) => (
-              <div key={f.name} className="p-4 bg-surface-container-low rounded-xl flex items-center gap-4">
-                <img src={f.img} alt={f.name} className="w-12 h-12 rounded-full object-cover shadow-sm" />
-                <div className="flex flex-col min-w-0">
-                  <span className="font-semibold text-on-surface text-sm truncate">{f.name}</span>
-                  <span className="text-xs text-primary font-medium">{f.role}</span>
-                  <span className="text-xs text-outline">{f.email}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {activeTab === "notes" && (
-        <div className="bg-surface-container-lowest rounded-xl shadow-sm p-6 flex flex-col gap-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-xl font-bold text-on-surface">Pastoral Care &amp; Counseling History</h2>
-              <p className="text-sm text-on-surface-variant">Confidential pastoral notes logged by authorized ministry staff.</p>
-            </div>
-            <button
-              onClick={() => setShowAddNoteModal(true)}
-              className="px-4 py-2 bg-primary text-on-primary rounded-lg text-sm font-semibold shadow-sm flex items-center gap-1.5"
-            >
-              <span className="material-symbols-outlined text-[18px]">add_circle</span>
-              <span>Add Pastoral Note</span>
-            </button>
-          </div>
-          <div className="flex flex-col gap-4">
-            {notesList.map((note) => (
-              <div key={note.id} className="p-4 bg-surface-container-low rounded-xl flex flex-col gap-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <div
-                      className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold"
-                      style={{ background: note.avatarBg, color: note.avatarColor }}
-                    >
-                      {note.initials}
-                    </div>
-                    <span className="font-semibold text-sm text-on-surface">{note.author}</span>
-                  </div>
-                  <span className="text-xs text-outline">{note.date}</span>
-                </div>
-                <p className="text-sm text-on-surface pl-9">{note.text}</p>
-                {note.status && (
-                  <div className="pl-9 flex items-center gap-1 text-xs text-tertiary font-semibold">
-                    <span className="material-symbols-outlined text-[14px]">check_circle</span>
-                    <span>{note.status}</span>
-                  </div>
                 )}
               </div>
-            ))}
+            </div>
           </div>
+          <div className="flex flex-wrap gap-2">
+            {member.phone_mobile && (
+              <a href={`tel:${member.phone_mobile}`} className="btn btn-secondary btn-sm">
+                <Icon name="call" size={18} />
+                Call
+              </a>
+            )}
+            {member.email && (
+              <a href={`mailto:${member.email}`} className="btn btn-secondary btn-sm">
+                <Icon name="mail" size={18} />
+                Email
+              </a>
+            )}
+            <Button size="sm" variant="primary" icon="edit" onClick={openEdit}>
+              Edit profile
+            </Button>
+            <Button size="sm" variant="danger-ghost" iconOnly icon="delete" aria-label={`Remove ${member.full_name}`} title="Remove person" onClick={() => setConfirmDelete(true)} />
+          </div>
+        </div>
+      </Card>
+
+      <Segmented<Tab> label="Profile sections" value={tab} onChange={setTab} options={tabs} />
+
+      {tab === "overview" && (
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <Card>
+            <CardHeader title="Contact" icon="contact_mail" />
+            <div className="px-5 pb-5">
+              <DetailList
+                items={[
+                  { label: "Email", value: member.email ? <a className="text-brand hover:underline" href={`mailto:${member.email}`}>{member.email}</a> : null },
+                  { label: "Mobile phone", value: member.phone_mobile },
+                  { label: "Home phone", value: member.phone_home },
+                  { label: "Work phone", value: member.phone_work },
+                ]}
+              />
+              <div className="mt-4 border-t border-line pt-4">
+                <DetailList columns={1} items={[{ label: "Address", value: addressLine }]} />
+              </div>
+            </div>
+          </Card>
+          <Card>
+            <CardHeader title="Personal" icon="person" />
+            <div className="px-5 pb-5">
+              <DetailList
+                items={[
+                  { label: "Gender", value: member.gender ? labelFor(GENDERS, member.gender) : null },
+                  { label: "Date of birth", value: member.date_of_birth ? `${formatDate(member.date_of_birth)}${member.age !== null ? ` (${member.age})` : ""}` : null },
+                  { label: "Marital status", value: member.marital_status ? labelFor(MARITAL_STATUSES, member.marital_status) : null },
+                  { label: "Occupation", value: [member.occupation, member.employer].filter(Boolean).join(" at ") },
+                ]}
+              />
+            </div>
+          </Card>
+          <Card>
+            <CardHeader title="Church membership" icon="church" />
+            <div className="px-5 pb-5">
+              <DetailList
+                items={[
+                  { label: "Status", value: <MemberStatusBadge status={member.status} /> },
+                  { label: "Life stage", value: member.life_stage ? labelFor(LIFE_STAGES, member.life_stage) : null },
+                  { label: "Membership date", value: member.membership_date ? formatDate(member.membership_date) : null },
+                  { label: "Baptism date", value: member.baptism_date ? formatDate(member.baptism_date) : null },
+                ]}
+              />
+            </div>
+          </Card>
+          <Card>
+            <CardHeader title="Notes" icon="sticky_note_2" description="General notes visible to staff" />
+            <div className="px-5 pb-5">
+              {member.notes ? (
+                <p className="whitespace-pre-wrap text-sm text-ink">{member.notes}</p>
+              ) : (
+                <p className="text-[13px] text-ink-muted">No general notes on this profile.</p>
+              )}
+              <p className="mt-4 text-[12px] text-ink-subtle">
+                Record created {formatDate(member.created_at)} · last updated {relativeTime(member.updated_at)}
+              </p>
+            </div>
+          </Card>
         </div>
       )}
 
-      {/* ── Modal for Adding Pastoral Note ── */}
+      {tab === "household" && <HouseholdTab member={member} token={t} onEdit={openEdit} />}
+      {tab === "giving" && <GivingTab memberId={member.id} token={t} />}
+      {tab === "notes" && canSeeNotes && <NotesTab memberId={member.id} token={t} currentUserId={user?.id} />}
+
+      {/* Edit dialog */}
       <Modal
-        isOpen={showAddNoteModal}
-        onClose={() => setShowAddNoteModal(false)}
-        title="Log Pastoral Care Note"
-        subtitle="Confidential pastoral notation for follow-up and discipleship"
-        maxWidth="lg"
-      >
-        <form onSubmit={handleAddNote} className="space-y-4">
-          <div>
-            <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-              Confidential Note Content *
-            </label>
-            <textarea
-              value={newNoteText}
-              onChange={(e) => setNewNoteText(e.target.value)}
-              placeholder="Record summary of prayer request, home visit, hospital check-in, or spiritual milestone..."
-              rows={4}
-              required
-              className="w-full sanctuary-input text-sm leading-relaxed resize-none"
-            />
-          </div>
-          <div className="p-3 bg-blue-50 border border-blue-100 rounded-xl flex items-center gap-2 text-xs text-blue-900">
-            <span className="material-symbols-outlined text-[18px] text-blue-700">lock</span>
-            <span>Encrypted &amp; viewable solely by authorized church ministry staff</span>
-          </div>
-          <div className="flex items-center justify-end gap-2 pt-3 border-t" style={{ borderColor: "#f2f3ff" }}>
-            <button
-              type="button"
-              onClick={() => setShowAddNoteModal(false)}
-              className="sanctuary-btn-secondary text-xs"
-            >
+        isOpen={editOpen}
+        onClose={() => setEditOpen(false)}
+        title="Edit profile"
+        subtitle={`Update ${member.full_name}'s details.`}
+        maxWidth="2xl"
+        isSubmitting={saving}
+        footer={
+          <>
+            <Button onClick={() => setEditOpen(false)} disabled={saving}>
               Cancel
-            </button>
-            <button
-              type="submit"
-              className="sanctuary-btn-primary text-xs"
-            >
-              Save Note
-            </button>
-          </div>
+            </Button>
+            <Button type="submit" form="member-edit-form" variant="primary" loading={saving}>
+              Save changes
+            </Button>
+          </>
+        }
+      >
+        <form id="member-edit-form" onSubmit={handleSave} noValidate className="flex flex-col gap-5">
+          {apiError ? <Alert title="Couldn't save changes">{errorMessage(apiError)}</Alert> : null}
+          <MemberFullForm values={values} set={set} errors={errors} apiError={apiError} disabled={saving} families={families} />
         </form>
       </Modal>
 
-      {/* ── Modal for Editing Member Profile ── */}
-      <Modal
-        isOpen={showEditModal}
-        onClose={() => !isSubmitting && setShowEditModal(false)}
-        title="Edit Congregant Profile"
-        subtitle="Update personal information, household, and church status"
-        maxWidth="xl"
-        isSubmitting={isSubmitting}
-      >
-        <form onSubmit={handleSaveProfile} className="space-y-4">
-          {formError && (
-            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
-              <span className="material-symbols-outlined text-sm">error</span>
-              <span>{formError}</span>
-            </div>
-          )}
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-                First Name *
-              </label>
-              <input
-                type="text"
-                required
-                disabled={isSubmitting}
-                value={editFirstName}
-                onChange={(e) => setEditFirstName(e.target.value)}
-                className="w-full sanctuary-input text-sm disabled:opacity-50"
-                placeholder="First Name"
-              />
-            </div>
-            <div>
-              <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-                Last Name *
-              </label>
-              <input
-                type="text"
-                required
-                disabled={isSubmitting}
-                value={editLastName}
-                onChange={(e) => setEditLastName(e.target.value)}
-                className="w-full sanctuary-input text-sm disabled:opacity-50"
-                placeholder="Last Name"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-                Email Address
-              </label>
-              <input
-                type="email"
-                disabled={isSubmitting}
-                value={editEmail}
-                onChange={(e) => setEditEmail(e.target.value)}
-                className="w-full sanctuary-input text-sm disabled:opacity-50"
-                placeholder="email@example.com"
-              />
-            </div>
-            <div>
-              <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-                Phone Number
-              </label>
-              <input
-                type="tel"
-                disabled={isSubmitting}
-                value={editPhone}
-                onChange={(e) => setEditPhone(e.target.value)}
-                className="w-full sanctuary-input text-sm disabled:opacity-50"
-                placeholder="(555) 000-0000"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-                Membership Status
-              </label>
-              <select
-                value={editStatus}
-                disabled={isSubmitting}
-                onChange={(e) => setEditStatus(e.target.value)}
-                className="w-full sanctuary-input text-sm cursor-pointer disabled:opacity-50"
-              >
-                <option value="active">Active Congregant</option>
-                <option value="inactive">Inactive</option>
-                <option value="visitor">Visitor</option>
-                <option value="transferred">Transferred</option>
-              </select>
-            </div>
-            <div>
-              <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-                Life Stage
-              </label>
-              <select
-                value={editLifeStage}
-                disabled={isSubmitting}
-                onChange={(e) => setEditLifeStage(e.target.value)}
-                className="w-full sanctuary-input text-sm cursor-pointer disabled:opacity-50"
-              >
-                <option value="adult">Adult</option>
-                <option value="young_adult">Young Adult</option>
-                <option value="youth">Youth</option>
-                <option value="child">Child / Sunday School</option>
-                <option value="senior">Senior</option>
-              </select>
-            </div>
-          </div>
-
-          <div>
-            <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-              Family / Household Unit
-            </label>
-            <input
-              type="text"
-              disabled={isSubmitting}
-              value={editFamily}
-              onChange={(e) => setEditFamily(e.target.value)}
-              className="w-full sanctuary-input text-sm disabled:opacity-50"
-              placeholder="e.g. Sterling Household"
-            />
-          </div>
-
-          <div className="flex items-center justify-end gap-2 pt-3 border-t" style={{ borderColor: "#f2f3ff" }}>
-            <button
-              type="button"
-              disabled={isSubmitting}
-              onClick={() => setShowEditModal(false)}
-              className="sanctuary-btn-secondary text-xs disabled:opacity-50"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={isSubmitting}
-              className="sanctuary-btn-primary text-xs flex items-center gap-1.5 disabled:opacity-60"
-            >
-              {isSubmitting && (
-                <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-              )}
-              <span>Save Changes</span>
-            </button>
-          </div>
-        </form>
-      </Modal>
-
-      {/* ── Confirmation Dialog for Delete ── */}
       <ConfirmDialog
-        isOpen={showDeleteConfirm}
-        onClose={() => !isDeleting && setShowDeleteConfirm(false)}
-        onConfirm={handleDeleteMember}
-        title="Delete Congregant Profile"
-        message={`Are you sure you want to permanently remove ${displayName} from the TLPCI church directory? All records, giving history, and attendance will be archived.`}
-        confirmText="Delete Congregant"
-        isDestructive={true}
-        isLoading={isDeleting}
+        isOpen={confirmDelete}
+        onClose={() => setConfirmDelete(false)}
+        onConfirm={handleDelete}
+        title="Remove person?"
+        message={
+          <>
+            <strong className="font-semibold text-ink">{member.full_name}</strong> will be permanently removed, along with their pastoral notes,
+            attendance and group memberships. Giving records are kept but unlinked. This can&apos;t be undone.
+          </>
+        }
+        confirmText="Remove person"
+        isLoading={deleting}
       />
     </div>
   );
 }
+
+/* ── Household tab ───────────────────────────────────────────────────── */
+function HouseholdTab({ member, token, onEdit }: { member: MemberDetail; token: string; onEdit: () => void }) {
+  const fam = member.family;
+  const relatives = useAsync(fam ? () => membersApi.list(token, `family=${fam.id}&page_size=50`) : null, [fam?.id]);
+
+  if (!fam) {
+    return (
+      <Card>
+        <EmptyState
+          icon="family_restroom"
+          title="Not linked to a household"
+          description="Link this person to a family to see everyone in their household together."
+          action={
+            <Button icon="edit" onClick={onEdit}>
+              Edit profile
+            </Button>
+          }
+        />
+      </Card>
+    );
+  }
+
+  const famAddress = [fam.address, [fam.city, fam.state].filter(Boolean).join(", "), fam.postal_code].filter(Boolean).join(" · ");
+
+  return (
+    <Card>
+      <CardHeader title={fam.name} description={famAddress || "No household address on record"} icon="family_restroom" />
+      <div className="px-2 pb-3">
+        {relatives.loading ? (
+          <TableSkeleton rows={3} cols={2} />
+        ) : relatives.error ? (
+          <ErrorState compact message={relatives.error} onRetry={relatives.reload} />
+        ) : (
+          <ul className="flex flex-col">
+            {(relatives.data?.results ?? []).map((m) => (
+              <li key={m.id}>
+                <Link
+                  href={`/dashboard/members/${m.id}`}
+                  aria-current={m.id === member.id ? "page" : undefined}
+                  className="flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors hover:bg-canvas aria-[current=page]:bg-brand-softer"
+                >
+                  <Avatar name={m.full_name} initials={initials(m.first_name, m.last_name)} src={m.photo} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-medium text-ink">
+                      {m.full_name}
+                      {m.id === member.id && <span className="ml-1.5 text-[12px] font-normal text-ink-muted">(this profile)</span>}
+                    </span>
+                    <span className="block text-[13px] text-ink-muted">
+                      {labelFor(LIFE_STAGES, m.life_stage)}
+                      {m.age !== null ? ` · ${m.age} yrs` : ""}
+                    </span>
+                  </span>
+                  <MemberStatusBadge status={m.status} />
+                </Link>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+/* ── Giving tab ──────────────────────────────────────────────────────── */
+function GivingTab({ memberId, token }: { memberId: string; token: string }) {
+  const giving = useAsync(() => contributionsApi.list(token, `member=${memberId}&ordering=-date&page_size=50`), [memberId]);
+  const rows = giving.data?.results ?? [];
+  const year = new Date().getFullYear();
+  const ytd = rows.filter((c) => c.date.startsWith(String(year))).reduce((s, c) => s + parseFloat(c.amount || "0"), 0);
+  const currency = rows[0]?.currency || "USD";
+
+  return (
+    <Card className="overflow-hidden">
+      <CardHeader
+        title="Giving history"
+        icon="volunteer_activism"
+        description={giving.data ? `${giving.data.count} contribution${giving.data.count === 1 ? "" : "s"} on record` : undefined}
+        actions={
+          rows.length > 0 ? (
+            <div className="text-right">
+              <p className="text-[12px] text-ink-muted">{year} total{giving.data && giving.data.count > rows.length ? " (latest 50)" : ""}</p>
+              <p className="text-lg font-semibold tabular-nums text-ink">{formatMoney(ytd, currency)}</p>
+            </div>
+          ) : undefined
+        }
+      />
+      {giving.loading ? (
+        <TableSkeleton rows={3} cols={3} />
+      ) : giving.error ? (
+        <ErrorState compact message={giving.error} onRetry={giving.reload} />
+      ) : rows.length === 0 ? (
+        <EmptyState compact icon="savings" title="No giving recorded" description="Contributions linked to this person will appear here." />
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th scope="col">Date</th>
+                <th scope="col">Fund</th>
+                <th scope="col">Type</th>
+                <th scope="col">Method</th>
+                <th scope="col" className="num">
+                  Amount
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((c) => (
+                <tr key={c.id}>
+                  <td className="whitespace-nowrap">{formatDate(c.date)}</td>
+                  <td>{c.fund_name}</td>
+                  <td className="text-ink-muted">{labelFor(CONTRIBUTION_TYPES, c.contribution_type)}</td>
+                  <td className="text-ink-muted">{labelFor(PAYMENT_METHODS, c.payment_method)}</td>
+                  <td className="num font-medium">{formatMoney(c.amount, c.currency)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/* ── Pastoral notes tab ──────────────────────────────────────────────── */
+function NotesTab({ memberId, token, currentUserId }: { memberId: string; token: string; currentUserId?: number }) {
+  const toast = useToast();
+  const notes = useAsync(() => membersApi.notes(token, memberId), [memberId]);
+  const [text, setText] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async (e: SyntheticEvent) => {
+    e.preventDefault();
+    const note = text.trim();
+    if (!note) {
+      setError("Write a note before saving.");
+      return;
+    }
+    if (saving) return;
+    setSaving(true);
+    try {
+      const created = await membersApi.addNote(token, memberId, note);
+      notes.setData([created, ...(notes.data ?? [])]);
+      setText("");
+      toast.success("Note saved", "The pastoral note was added to this profile.");
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+      <Card className="p-5 lg:col-span-5 lg:self-start">
+        <h2 className="text-[15px] font-semibold text-ink">Add a pastoral note</h2>
+        <p className="mt-0.5 text-[13px] text-ink-muted">Visible only to pastors and administrators.</p>
+        <form onSubmit={submit} className="mt-4 flex flex-col gap-3">
+          <Field label="Note" required error={error || undefined}>
+            {(p) => (
+              <Textarea
+                {...p}
+                rows={5}
+                value={text}
+                disabled={saving}
+                placeholder="Prayer request, visit summary, follow-up needed…"
+                onChange={(e) => {
+                  setText(e.target.value);
+                  setError("");
+                }}
+              />
+            )}
+          </Field>
+          <div className="flex justify-end">
+            <Button type="submit" variant="primary" icon="add" loading={saving}>
+              Save note
+            </Button>
+          </div>
+        </form>
+      </Card>
+
+      <Card className="lg:col-span-7">
+        <CardHeader title="Pastoral history" icon="lock" description="Most recent first" />
+        <div className="px-5 pb-5">
+          {notes.loading ? (
+            <div className="space-y-3">
+              <Skeleton className="h-16 w-full" />
+              <Skeleton className="h-16 w-full" />
+            </div>
+          ) : notes.error ? (
+            notes.error.includes("permission") ? (
+              <Alert tone="warning">Your role can&apos;t view pastoral notes.</Alert>
+            ) : (
+              <ErrorState compact message={notes.error} onRetry={notes.reload} />
+            )
+          ) : !notes.data || notes.data.length === 0 ? (
+            <EmptyState compact icon="edit_note" title="No pastoral notes yet" description="Notes you add will be listed here." />
+          ) : (
+            <ol className="flex flex-col gap-3">
+              {notes.data.map((n) => (
+                <li key={n.id} className="rounded-lg border border-line bg-surface-muted p-3.5">
+                  <div className="flex items-center justify-between gap-2 text-[12px] text-ink-muted">
+                    <Badge tone={n.created_by_user_id === currentUserId ? "brand" : "neutral"}>
+                      {n.created_by_user_id === currentUserId ? "You" : `Staff user #${n.created_by_user_id}`}
+                    </Badge>
+                    <time dateTime={n.created_at} title={formatDateTime(n.created_at)}>
+                      {relativeTime(n.created_at)}
+                    </time>
+                  </div>
+                  <p className="mt-2 whitespace-pre-wrap text-sm text-ink">{n.note}</p>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      </Card>
+    </div>
+  );
+}
+

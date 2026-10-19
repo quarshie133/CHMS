@@ -1,6 +1,8 @@
 "use client";
 
-import React, { useEffect, useCallback } from "react";
+import React, { useEffect, useId, useRef } from "react";
+import { createPortal } from "react-dom";
+import { Button, Icon } from "./primitives";
 
 interface ModalProps {
   isOpen: boolean;
@@ -9,16 +11,27 @@ interface ModalProps {
   subtitle?: string;
   maxWidth?: "sm" | "md" | "lg" | "xl" | "2xl" | string;
   children: React.ReactNode;
+  /** Sticky action row. Put the primary action last. */
+  footer?: React.ReactNode;
+  /** While true, the dialog cannot be dismissed (request in flight). */
   isSubmitting?: boolean;
+  /** "dialog" is centered; "drawer" slides in from the right for record details. */
+  variant?: "dialog" | "drawer";
 }
 
 const MAX_WIDTHS: Record<string, string> = {
-  sm: "max-w-sm",
-  md: "max-w-md",
-  lg: "max-w-lg",
-  xl: "max-w-xl",
-  "2xl": "max-w-2xl",
+  sm: "sm:max-w-sm",
+  md: "sm:max-w-md",
+  lg: "sm:max-w-lg",
+  xl: "sm:max-w-xl",
+  "2xl": "sm:max-w-2xl",
 };
+
+// Only the top-most open dialog reacts to Escape / owns focus.
+const stack: string[] = [];
+
+const FOCUSABLE =
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 export function Modal({
   isOpen,
@@ -27,61 +40,103 @@ export function Modal({
   subtitle,
   maxWidth = "md",
   children,
+  footer,
   isSubmitting = false,
+  variant = "dialog",
 }: ModalProps) {
-  const widthClass = MAX_WIDTHS[maxWidth] || maxWidth;
-  const handleKeyDown = useCallback(
-    (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !isSubmitting) {
-        onClose();
-      }
-    },
-    [onClose, isSubmitting]
-  );
+  const id = useId();
+  const panelRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  const submittingRef = useRef(isSubmitting);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+    submittingRef.current = isSubmitting;
+  });
 
   useEffect(() => {
-    if (isOpen) {
-      document.body.style.overflow = "hidden";
-      window.addEventListener("keydown", handleKeyDown);
-    } else {
-      document.body.style.overflow = "";
-    }
-    return () => {
-      document.body.style.overflow = "";
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [isOpen, handleKeyDown]);
+    if (!isOpen) return;
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    stack.push(id);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
 
-  if (!isOpen) return null;
+    // Move focus into the dialog: first form field, otherwise the panel.
+    const t = window.setTimeout(() => {
+      const panel = panelRef.current;
+      if (!panel) return;
+      const body = panel.querySelector<HTMLElement>("[data-modal-body]");
+      const first = body?.querySelector<HTMLElement>("input:not([disabled]):not([type=hidden]), select:not([disabled]), textarea:not([disabled])");
+      (first ?? panel).focus();
+    }, 20);
 
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 overflow-y-auto"
-      style={{ backgroundColor: "rgba(15, 23, 42, 0.45)", backdropFilter: "blur(6px)" }}
-      role="dialog"
-      aria-modal="true"
-      onClick={(e) => {
-        if (e.target === e.currentTarget && !isSubmitting) {
-          onClose();
+    const onKey = (e: KeyboardEvent) => {
+      if (stack[stack.length - 1] !== id) return;
+      if (e.key === "Escape") {
+        if (!submittingRef.current) {
+          e.stopPropagation();
+          onCloseRef.current();
         }
-      }}
+      } else if (e.key === "Tab" && panelRef.current) {
+        const nodes = Array.from(panelRef.current.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((n) => n.offsetParent !== null);
+        if (nodes.length === 0) return;
+        const first = nodes[0];
+        const last = nodes[nodes.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    document.addEventListener("keydown", onKey);
+
+    return () => {
+      window.clearTimeout(t);
+      document.removeEventListener("keydown", onKey);
+      const i = stack.lastIndexOf(id);
+      if (i >= 0) stack.splice(i, 1);
+      if (stack.length === 0) document.body.style.overflow = prevOverflow;
+      previouslyFocused?.focus?.();
+    };
+  }, [isOpen, id]);
+
+  if (!isOpen || typeof document === "undefined") return null;
+
+  const isDrawer = variant === "drawer";
+  const widthClass = MAX_WIDTHS[maxWidth] || maxWidth;
+
+  const dialog = (
+    <div
+      className={`fixed inset-0 z-[60] flex ${isDrawer ? "justify-end" : "items-end justify-center sm:items-center sm:p-6"}`}
+      role="presentation"
     >
       <div
-        className={`w-full ${widthClass} bg-white rounded-2xl shadow-2xl border flex flex-col overflow-hidden my-auto animate-in fade-in zoom-in-95 duration-150`}
-        style={{ borderColor: "#e2e7ff", maxHeight: "calc(100vh - 3rem)" }}
-        onClick={(e) => e.stopPropagation()}
+        className="absolute inset-0 bg-[#0b1220]/50 backdrop-blur-[2px] animate-fade-in"
+        aria-hidden
+        onClick={() => !isSubmitting && onClose()}
+      />
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={`${id}-title`}
+        aria-describedby={subtitle ? `${id}-desc` : undefined}
+        tabIndex={-1}
+        className={
+          isDrawer
+            ? `relative flex h-full w-full ${widthClass || "sm:max-w-lg"} flex-col bg-surface shadow-[var(--shadow-overlay)] outline-none animate-slide-in-right`
+            : `relative flex w-full ${widthClass} max-h-[92dvh] flex-col overflow-hidden rounded-t-[var(--radius-dialog)] border border-line bg-surface shadow-[var(--shadow-overlay)] outline-none animate-scale-in sm:max-h-[calc(100dvh-3rem)] sm:rounded-[var(--radius-dialog)]`
+        }
       >
-        {/* Modal Header */}
-        <div
-          className="flex items-center justify-between px-6 py-4 border-b flex-shrink-0"
-          style={{ borderColor: "#f2f3ff", background: "#faf8ff" }}
-        >
-          <div>
-            <h3 className="text-base font-bold" style={{ color: "#131b2e", letterSpacing: "-0.01em" }}>
+        <div className="flex items-start justify-between gap-4 border-b border-line px-5 py-4 sm:px-6">
+          <div className="min-w-0">
+            <h2 id={`${id}-title`} className="text-base font-semibold leading-6 text-ink">
               {title}
-            </h3>
+            </h2>
             {subtitle && (
-              <p className="text-xs mt-0.5" style={{ color: "#747686" }}>
+              <p id={`${id}-desc`} className="mt-0.5 text-[13px] text-ink-muted">
                 {subtitle}
               </p>
             )}
@@ -91,17 +146,26 @@ export function Modal({
             onClick={onClose}
             disabled={isSubmitting}
             aria-label="Close dialog"
-            className="w-8 h-8 rounded-lg flex items-center justify-center text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-40 cursor-pointer"
+            className="-mr-1.5 -mt-0.5 inline-flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg text-ink-muted transition-colors hover:bg-canvas hover:text-ink disabled:opacity-40"
           >
-            <span className="material-symbols-outlined text-[20px]">close</span>
+            <Icon name="close" size={20} />
           </button>
         </div>
 
-        {/* Modal Body */}
-        <div className="p-6 overflow-y-auto max-h-[calc(100vh-12rem)]">{children}</div>
+        <div data-modal-body className="flex-1 overflow-y-auto px-5 py-5 sm:px-6">
+          {children}
+        </div>
+
+        {footer && (
+          <div className="flex flex-col-reverse gap-2 border-t border-line bg-surface-muted px-5 py-3.5 sm:flex-row sm:items-center sm:justify-end sm:px-6">
+            {footer}
+          </div>
+        )}
       </div>
     </div>
   );
+
+  return createPortal(dialog, document.body);
 }
 
 interface ConfirmDialogProps {
@@ -109,7 +173,7 @@ interface ConfirmDialogProps {
   onClose: () => void;
   onConfirm: () => void | Promise<void>;
   title: string;
-  message: string;
+  message: React.ReactNode;
   confirmText?: string;
   cancelText?: string;
   isDestructive?: boolean;
@@ -129,70 +193,40 @@ export function ConfirmDialog({
   isDestructive = true,
   variant,
   isLoading = false,
-  icon = "warning",
+  icon,
 }: ConfirmDialogProps) {
-  if (!isOpen) return null;
-  const isDestruct = variant ? variant === "danger" : isDestructive;
+  const tone = variant ?? (isDestructive ? "danger" : "info");
+  const iconName = icon ?? (tone === "danger" ? "delete" : tone === "warning" ? "warning" : "help");
+  const iconCls =
+    tone === "danger"
+      ? "bg-danger-soft text-danger"
+      : tone === "warning"
+        ? "bg-warning-soft text-warning"
+        : "bg-brand-soft text-brand";
 
   return (
     <Modal
       isOpen={isOpen}
       onClose={onClose}
       title={title}
-      maxWidth="sm"
+      maxWidth="md"
       isSubmitting={isLoading}
-    >
-      <div className="flex flex-col items-center text-center space-y-4">
-        <div
-          className="w-12 h-12 rounded-full flex items-center justify-center flex-shrink-0 shadow-xs"
-          style={{
-            background: isDestruct ? "#ffdad6" : "#eaedff",
-            color: isDestruct ? "#ba1a1a" : "#0037b0",
-          }}
-        >
-          <span className="material-symbols-outlined text-2xl">{icon}</span>
-        </div>
-
-        <div>
-          <p className="text-sm leading-relaxed" style={{ color: "#434655" }}>
-            {message}
-          </p>
-        </div>
-
-        <div className="flex items-center gap-3 w-full pt-2">
-          <button
-            type="button"
-            disabled={isLoading}
-            onClick={onClose}
-            className="flex-1 py-2.5 px-4 rounded-xl text-xs font-semibold border transition-all cursor-pointer"
-            style={{
-              borderColor: "#e2e7ff",
-              background: "#ffffff",
-              color: "#434655",
-            }}
-          >
+      footer={
+        <>
+          <Button onClick={onClose} disabled={isLoading}>
             {cancelText}
-          </button>
-          <button
-            type="button"
-            disabled={isLoading}
-            onClick={onConfirm}
-            className="flex-1 py-2.5 px-4 rounded-xl text-xs font-semibold text-white shadow-sm transition-all flex items-center justify-center gap-1.5 cursor-pointer"
-            style={{
-              background: isDestruct ? "#ba1a1a" : "#1d4ed8",
-              opacity: isLoading ? 0.7 : 1,
-            }}
-          >
-            {isLoading ? (
-              <>
-                <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                <span>Processing...</span>
-              </>
-            ) : (
-              <span>{confirmText}</span>
-            )}
-          </button>
-        </div>
+          </Button>
+          <Button variant={tone === "danger" ? "danger" : "primary"} onClick={onConfirm} loading={isLoading}>
+            {isLoading ? "Working…" : confirmText}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex items-start gap-4">
+        <span className={`inline-flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full ${iconCls}`}>
+          <Icon name={iconName} size={20} />
+        </span>
+        <div className="pt-1.5 text-sm leading-relaxed text-ink-muted">{message}</div>
       </div>
     </Modal>
   );

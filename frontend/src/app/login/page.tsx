@@ -1,11 +1,23 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type SyntheticEvent } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
+import { errorMessage } from "@/lib/api";
+import { Field, Input } from "@/components/ui/form";
+import { Alert, Button, Icon } from "@/components/ui/primitives";
+
+const DEMO_ACCOUNTS =
+  process.env.NODE_ENV !== "production"
+    ? [
+        { email: "admin@churchms.org", label: "Admin" },
+        { email: "pastor@churchms.org", label: "Pastor" },
+        { email: "finance@churchms.org", label: "Finance" },
+      ]
+    : [];
 
 export default function LoginPage() {
-  const { login } = useAuth();
+  const { login, isAuthenticated, loading: authLoading } = useAuth();
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -13,170 +25,133 @@ export default function LoginPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  async function handleSubmit(e: FormEvent) {
+  // Already signed in — go straight to the workspace.
+  useEffect(() => {
+    if (!authLoading && isAuthenticated) router.replace("/dashboard");
+  }, [authLoading, isAuthenticated, router]);
+
+  async function handleSubmit(e: SyntheticEvent) {
     e.preventDefault();
+    if (loading) return;
+    if (!email.trim() || !password) {
+      setError("Enter your email and password.");
+      return;
+    }
     setError("");
     setLoading(true);
     try {
-      await login(email, password);
+      await login(email.trim(), password);
       router.push("/dashboard");
-    } catch (err: unknown) {
-      setError((err as { detail?: string })?.detail ?? "Invalid credentials. Please try again.");
-    } finally {
+    } catch (err) {
+      const status = (err as { status?: number })?.status;
+      setError(status === 401 ? "That email and password combination didn't work. Please try again." : errorMessage(err, "Sign-in failed. Please try again."));
       setLoading(false);
     }
   }
 
-  function fillDemo(roleEmail: string) {
-    setEmail(roleEmail);
-    setPassword("password123");
-  }
-
   return (
-    <div
-      className="min-h-screen flex items-center justify-center p-4 relative"
-      style={{ background: "#faf8ff" }}
-    >
-      {/* Decorative background ambiance */}
-      <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div
-          className="absolute -top-32 -left-32 w-96 h-96 rounded-full blur-3xl opacity-40"
-          style={{ background: "#dce1ff" }}
-        />
-        <div
-          className="absolute -bottom-32 -right-32 w-96 h-96 rounded-full blur-3xl opacity-30"
-          style={{ background: "#ffddb8" }}
-        />
-      </div>
-
-      <div className="relative w-full max-w-md slide-up">
-        {/* Brand Header */}
-        <div className="text-center mb-8">
-          {/* Real TLPCI Logo */}
-          <div className="inline-flex items-center justify-center w-20 h-20 rounded-full shadow-xl mb-3 overflow-hidden">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src="/tlpci-logo.png" alt="TLPCI Logo" className="w-full h-full object-cover" />
+    <div className="grid min-h-dvh lg:grid-cols-[1fr_minmax(480px,560px)]">
+      {/* Brand panel */}
+      <aside className="relative hidden overflow-hidden bg-nav lg:flex lg:flex-col lg:justify-between lg:p-12">
+        <div className="flex items-center gap-3">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/tlpci-logo.png" alt="" className="h-11 w-11 rounded-full bg-white object-cover" />
+          <div className="leading-tight">
+            <p className="text-sm font-semibold text-white">TLPCI House of Prayer - CHMS</p>
+            <p className="text-[12px] text-nav-ink">Ministry workspace</p>
           </div>
-          <h1 className="text-2xl font-bold" style={{ color: "#131b2e", letterSpacing: "-0.015em" }}>
-            TLPCI ChurchMS
-          </h1>
-          <p className="text-xs mt-1" style={{ color: "#747686" }}>
-            The Lord&apos;s Pentecostal Church International — Ministry Portal
+        </div>
+        <div className="max-w-md">
+          <h1 className="text-3xl font-semibold leading-tight tracking-tight text-white">Caring for every member of the congregation.</h1>
+          <p className="mt-4 text-[15px] leading-relaxed text-nav-ink">
+            People, groups, attendance, giving and communication for The Lord&apos;s Pentecostal Church International — in one place.
           </p>
         </div>
+        <p className="text-[12px] text-[#7f93ad]">Founded 1961 · The Lord&apos;s Pentecostal Church International</p>
+        <div aria-hidden className="pointer-events-none absolute -right-24 -top-24 h-80 w-80 rounded-full border-[40px] border-white/[0.04]" />
+        <div aria-hidden className="pointer-events-none absolute -bottom-32 right-24 h-72 w-72 rounded-full border-[32px] border-accent/10" />
+      </aside>
 
-        {/* Card */}
-        <div className="sanctuary-card p-8 shadow-xl space-y-6">
-          <div>
-            <h2 className="text-lg font-bold" style={{ color: "#131b2e" }}>
-              Sign in to your account
-            </h2>
-            <p className="text-xs mt-0.5" style={{ color: "#747686" }}>
-              Enter your church credentials to proceed
-            </p>
+      {/* Form */}
+      <main className="flex items-center justify-center bg-surface px-4 py-10 sm:px-8">
+        <div className="w-full max-w-sm animate-rise-in">
+          <div className="mb-8 flex flex-col items-center text-center lg:hidden">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/tlpci-logo.png" alt="TLPCI logo" className="h-16 w-16 rounded-full object-cover shadow-[var(--shadow-raised)]" />
+            <p className="mt-3 text-sm font-semibold text-ink">TLPCI ChurchMS</p>
           </div>
 
-          {error && (
-            <div className="p-3 rounded-xl flex items-center gap-2 text-xs text-[#ba1a1a] bg-[#ffdad6]">
-              <span className="material-symbols-outlined text-sm">error</span>
-              <span>{error}</span>
-            </div>
-          )}
+          <h2 className="text-2xl font-semibold tracking-tight text-ink">Sign in</h2>
+          <p className="mt-1 text-sm text-ink-muted">Use the email and password for your church account.</p>
 
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div>
-              <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-                Email Address
-              </label>
-              <input
-                type="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="pastor@churchms.org"
-                className="w-full sanctuary-input text-sm"
-              />
-            </div>
-
-            <div>
-              <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-                Password
-              </label>
-              <div className="relative">
-                <input
-                  type={showPassword ? "text" : "password"}
-                  required
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="w-full sanctuary-input text-sm pr-10"
+          <form onSubmit={handleSubmit} noValidate className="mt-8 flex flex-col gap-4">
+            {error && <Alert>{error}</Alert>}
+            <Field label="Email">
+              {(p) => (
+                <Input
+                  {...p}
+                  type="email"
+                  autoComplete="email"
+                  autoFocus
+                  value={email}
+                  disabled={loading}
+                  placeholder="you@church.org"
+                  onChange={(e) => setEmail(e.target.value)}
                 />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 focus:outline-none"
-                  tabIndex={-1}
-                >
-                  <span className="material-symbols-outlined text-[18px]">
-                    {showPassword ? "visibility_off" : "visibility"}
-                  </span>
-                </button>
-              </div>
-            </div>
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full sanctuary-btn-primary justify-center py-3 text-sm font-semibold"
-            >
-              {loading ? (
-                <span className="flex items-center gap-2">
-                  <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  Authenticating...
-                </span>
-              ) : (
-                "Sign In to TLPCI"
               )}
-            </button>
+            </Field>
+            <Field label="Password">
+              {(p) => (
+                <div className="relative">
+                  <Input
+                    {...p}
+                    type={showPassword ? "text" : "password"}
+                    autoComplete="current-password"
+                    value={password}
+                    disabled={loading}
+                    className="pr-11"
+                    onChange={(e) => setPassword(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((s) => !s)}
+                    aria-label={showPassword ? "Hide password" : "Show password"}
+                    aria-pressed={showPassword}
+                    className="absolute right-1.5 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-md text-ink-muted hover:bg-canvas hover:text-ink"
+                  >
+                    <Icon name={showPassword ? "visibility_off" : "visibility"} size={18} />
+                  </button>
+                </div>
+              )}
+            </Field>
+            <Button type="submit" variant="primary" loading={loading} className="mt-2 w-full">
+              {loading ? "Signing in…" : "Sign in"}
+            </Button>
           </form>
 
-          {/* Quick Demo Logins */}
-          <div className="pt-4 border-t space-y-2.5" style={{ borderColor: "#e2e7ff" }}>
-            <span className="text-[10px] font-bold uppercase tracking-wider block text-center" style={{ color: "#747686" }}>
-              Quick Demo Accounts
-            </span>
-            <div className="grid grid-cols-3 gap-2 text-xs font-semibold">
-              <button
-                type="button"
-                onClick={() => fillDemo("admin@churchms.org")}
-                className="p-2 rounded-lg text-left border transition-colors hover:border-[#1d4ed8]"
-                style={{ background: "#f2f3ff", borderColor: "#e2e7ff", color: "#131b2e" }}
-              >
-                <div className="text-[11px] font-bold truncate" style={{ color: "#0037b0" }}>Admin</div>
-                <div className="text-[10px] truncate" style={{ color: "#747686" }}>Super User</div>
-              </button>
-              <button
-                type="button"
-                onClick={() => fillDemo("pastor@churchms.org")}
-                className="p-2 rounded-lg text-left border transition-colors hover:border-[#1d4ed8]"
-                style={{ background: "#f2f3ff", borderColor: "#e2e7ff", color: "#131b2e" }}
-              >
-                <div className="text-[11px] font-bold truncate" style={{ color: "#0037b0" }}>Pastor</div>
-                <div className="text-[10px] truncate" style={{ color: "#747686" }}>Branch Lead</div>
-              </button>
-              <button
-                type="button"
-                onClick={() => fillDemo("finance@churchms.org")}
-                className="p-2 rounded-lg text-left border transition-colors hover:border-[#855300]"
-                style={{ background: "#f2f3ff", borderColor: "#e2e7ff", color: "#131b2e" }}
-              >
-                <div className="text-[11px] font-bold truncate" style={{ color: "#855300" }}>Finance</div>
-                <div className="text-[10px] truncate" style={{ color: "#747686" }}>Treasurer</div>
-              </button>
+          {DEMO_ACCOUNTS.length > 0 && (
+            <div className="mt-8 border-t border-line pt-6">
+              <p className="text-[12px] font-medium text-ink-muted">Development accounts</p>
+              <div className="mt-2 grid grid-cols-3 gap-2">
+                {DEMO_ACCOUNTS.map((a) => (
+                  <Button
+                    key={a.email}
+                    size="sm"
+                    onClick={() => {
+                      setEmail(a.email);
+                      setPassword("password123");
+                      setError("");
+                    }}
+                  >
+                    {a.label}
+                  </Button>
+                ))}
+              </div>
+              <p className="mt-2 text-[12px] text-ink-subtle">Fills in seeded demo credentials. Hidden in production builds.</p>
             </div>
-          </div>
+          )}
         </div>
-      </div>
+      </main>
     </div>
   );
 }

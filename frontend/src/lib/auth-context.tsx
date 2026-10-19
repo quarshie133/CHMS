@@ -8,7 +8,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { authApi, type User } from "@/lib/api";
+import { authApi, AUTH_SESSION_EXPIRED, AUTH_TOKEN_REFRESHED, type User } from "@/lib/api";
 
 interface AuthContextType {
   user: User | null;
@@ -24,27 +24,54 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
+/** Roles the backend treats as staff-or-above (IsStaffOrAbove). */
+export const STAFF_ROLES = ["super_admin", "church_admin", "pastor", "staff"];
+/** Roles the backend treats as admin-or-above (IsAdminOrAbove). */
+export const ADMIN_ROLES = ["super_admin", "church_admin"];
+/** Roles the backend treats as pastor-or-above (IsPastorOrAbove). */
+export const PASTOR_ROLES = ["super_admin", "church_admin", "pastor"];
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const clearSession = useCallback(() => {
+    localStorage.removeItem("access_token");
+    localStorage.removeItem("refresh_token");
+    setToken(null);
+    setUser(null);
+  }, []);
+
   useEffect(() => {
     const storedToken = localStorage.getItem("access_token");
+    const finish = () => setLoading(false);
     if (storedToken) {
-      setToken(storedToken);
       authApi
         .me(storedToken)
-        .then(setUser)
-        .catch(() => {
-          localStorage.removeItem("access_token");
-          localStorage.removeItem("refresh_token");
+        .then((me) => {
+          setUser(me);
+          // The request may have refreshed the token on the way.
+          setToken(localStorage.getItem("access_token"));
         })
-        .finally(() => setLoading(false));
+        .catch(clearSession)
+        .finally(finish);
     } else {
-      setLoading(false);
+      queueMicrotask(finish);
     }
-  }, []);
+  }, [clearSession]);
+
+  // Keep React state in sync with token refreshes and expired sessions.
+  useEffect(() => {
+    const onRefreshed = (e: Event) => setToken((e as CustomEvent<string>).detail);
+    const onExpired = () => clearSession();
+    window.addEventListener(AUTH_TOKEN_REFRESHED, onRefreshed);
+    window.addEventListener(AUTH_SESSION_EXPIRED, onExpired);
+    return () => {
+      window.removeEventListener(AUTH_TOKEN_REFRESHED, onRefreshed);
+      window.removeEventListener(AUTH_SESSION_EXPIRED, onExpired);
+    };
+  }, [clearSession]);
 
   const login = useCallback(async (email: string, password: string) => {
     const data = await authApi.login(email, password);
@@ -55,12 +82,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(me);
   }, []);
 
-  const logout = useCallback(() => {
-    localStorage.removeItem("access_token");
-    localStorage.removeItem("refresh_token");
-    setToken(null);
-    setUser(null);
-  }, []);
+  const logout = clearSession;
 
   const updateUser = useCallback((updated: User) => {
     setUser(updated);

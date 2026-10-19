@@ -1,331 +1,424 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState, type SyntheticEvent } from "react";
 import { useAuth } from "@/lib/auth-context";
-import { sermonsApi, type Sermon } from "@/lib/api";
+import { errorMessage, fieldError, listAll, seriesApi, sermonsApi, type Sermon } from "@/lib/api";
+import { useAsync, useDebounced } from "@/lib/hooks";
+import { formatDate, formatNumber, todayISO } from "@/lib/format";
+import { Modal, ConfirmDialog } from "@/components/ui/modal";
+import { useToast } from "@/components/ui/toast";
+import { Field, Input, Select, Switch, Textarea } from "@/components/ui/form";
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  ErrorState,
+  Icon,
+  PageHeader,
+  SearchInput,
+  Segmented,
+  Skeleton,
+} from "@/components/ui/primitives";
 
-const SAMPLE_SERMONS: Sermon[] = [
-  {
-    id: "1",
-    title: "Walking in Divine Purpose",
-    speaker: "Pastor Grace Miller",
-    scripture_reference: "Jeremiah 29:11-14",
-    date: "2026-09-27",
-    series_title: "Faith for the Future",
-    thumbnail: null,
-    video_url: "https://youtube.com",
-    audio_url: "https://audio.churchms.org",
-    is_published: true,
-    views_count: 482,
-    tags: ["Faith", "Purpose", "Hope"],
-  },
-  {
-    id: "2",
-    title: "The Architecture of Unceasing Prayer",
-    speaker: "Pastor Grace Miller",
-    scripture_reference: "1 Thessalonians 5:16-18",
-    date: "2026-09-20",
-    series_title: "Faith for the Future",
-    thumbnail: null,
-    video_url: "https://youtube.com",
-    audio_url: "https://audio.churchms.org",
-    is_published: true,
-    views_count: 615,
-    tags: ["Prayer", "Spiritual Disciplines"],
-  },
-  {
-    id: "3",
-    title: "Generosity That Moves Mountains",
-    speaker: "Guest Evangelist Samuel King",
-    scripture_reference: "2 Corinthians 9:6-11",
-    date: "2026-09-13",
-    series_title: "Kingdom Stewardship",
-    thumbnail: null,
-    video_url: "https://youtube.com",
-    audio_url: "https://audio.churchms.org",
-    is_published: true,
-    views_count: 530,
-    tags: ["Giving", "Faith"],
-  },
-  {
-    id: "4",
-    title: "Rooted: Overcoming Seasons of Anxiety",
-    speaker: "Pastor Grace Miller",
-    scripture_reference: "Philippians 4:4-9",
-    date: "2026-09-06",
-    series_title: "Rooted & Established",
-    thumbnail: null,
-    video_url: "https://youtube.com",
-    audio_url: "https://audio.churchms.org",
-    is_published: true,
-    views_count: 890,
-    tags: ["Peace", "Mental Health", "Comfort"],
-  },
-];
+const NEW_SERIES = "__new__";
+type Published = "all" | "published" | "draft";
+
+interface SermonForm {
+  title: string;
+  speaker: string;
+  date: string;
+  scripture_reference: string;
+  series: string;
+  newSeries: string;
+  description: string;
+  video_url: string;
+  audio_url: string;
+  tags: string;
+  is_published: boolean;
+}
+
+const emptyForm = (): SermonForm => ({
+  title: "",
+  speaker: "",
+  date: todayISO(),
+  scripture_reference: "",
+  series: "",
+  newSeries: "",
+  description: "",
+  video_url: "",
+  audio_url: "",
+  tags: "",
+  is_published: true,
+});
+
+function validUrl(v: string) {
+  if (!v) return true;
+  try {
+    const u = new URL(v);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
 
 export default function SermonsPage() {
   const { token } = useAuth();
-  const [sermons, setSermons] = useState<Sermon[]>([]);
+  const toast = useToast();
+  const t = token ?? "";
+
   const [search, setSearch] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [showUploadModal, setShowUploadModal] = useState(false);
+  const [series, setSeries] = useState("");
+  const [published, setPublished] = useState<Published>("all");
+  const debouncedSearch = useDebounced(search.trim());
 
-  // Form states
-  const [newTitle, setNewTitle] = useState("");
-  const [newSpeaker, setNewSpeaker] = useState("Pastor Grace Miller");
-  const [newScripture, setNewScripture] = useState("");
-  const [newSeries, setNewSeries] = useState("Faith for the Future");
-
-  useEffect(() => {
-    if (!token) return;
-    setLoading(true);
-    const params = new URLSearchParams();
-    if (search) params.set("search", search);
-    sermonsApi
-      .list(token, params.toString())
-      .then((r) => {
-        if (r.results && r.results.length > 0) {
-          setSermons(r.results);
-        } else {
-          setSermons(SAMPLE_SERMONS);
+  const seriesList = useAsync(token ? () => listAll(seriesApi.list, t) : null, [token]);
+  const sermons = useAsync(
+    token
+      ? () => {
+          const qs = new URLSearchParams({ ordering: "-date" });
+          if (debouncedSearch) qs.set("search", debouncedSearch);
+          if (series) qs.set("series", series);
+          if (published !== "all") qs.set("is_published", published === "published" ? "true" : "false");
+          return listAll(sermonsApi.list, t, qs.toString());
         }
-      })
-      .catch((e) => {
-        console.warn("Could not fetch remote sermons, using Sanctuary sample sermons", e);
-        setSermons(SAMPLE_SERMONS);
-      })
-      .finally(() => setLoading(false));
-  }, [token, search]);
-
-  const filtered = sermons.filter(
-    (s) =>
-      s.title.toLowerCase().includes(search.toLowerCase()) ||
-      s.speaker.toLowerCase().includes(search.toLowerCase()) ||
-      s.scripture_reference.toLowerCase().includes(search.toLowerCase())
+      : null,
+    [token, debouncedSearch, series, published]
   );
 
-  const handleUpload = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newTitle.trim()) return;
-    const added: Sermon = {
-      id: Date.now().toString(),
-      title: newTitle,
-      speaker: newSpeaker,
-      scripture_reference: newScripture,
-      date: new Date().toISOString().split("T")[0],
-      series_title: newSeries,
-      thumbnail: null,
-      video_url: "",
-      audio_url: "",
-      is_published: true,
-      views_count: 1,
-      tags: ["Sunday Sermon"],
-    };
-    setSermons([added, ...sermons]);
-    setShowUploadModal(false);
-    setNewTitle("");
-    setNewScripture("");
+  // ── Form ───────────────────────────────────────────────────────────────
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<Sermon | null>(null);
+  const [form, setForm] = useState<SermonForm>(emptyForm);
+  const [errors, setErrors] = useState<Partial<Record<keyof SermonForm, string>>>({});
+  const [apiError, setApiError] = useState<unknown>(null);
+  const [saving, setSaving] = useState(false);
+  const setF = <K extends keyof SermonForm>(k: K, v: SermonForm[K]) => {
+    setForm((f) => ({ ...f, [k]: v }));
+    setErrors((e) => ({ ...e, [k]: undefined }));
   };
 
+  const openForm = (s: Sermon | null) => {
+    setEditing(s);
+    setForm(
+      s
+        ? {
+            title: s.title,
+            speaker: s.speaker,
+            date: s.date,
+            scripture_reference: s.scripture_reference ?? "",
+            series: s.series ?? "",
+            newSeries: "",
+            description: s.description ?? "",
+            video_url: s.video_url ?? "",
+            audio_url: s.audio_url ?? "",
+            tags: (s.tags ?? []).join(", "),
+            is_published: s.is_published,
+          }
+        : emptyForm()
+    );
+    setErrors({});
+    setApiError(null);
+    setOpen(true);
+  };
+
+  const save = async (e: SyntheticEvent) => {
+    e.preventDefault();
+    if (!token || saving) return;
+    const errs: typeof errors = {};
+    if (!form.title.trim()) errs.title = "Sermon title is required.";
+    if (!form.speaker.trim()) errs.speaker = "Speaker is required.";
+    if (!form.date) errs.date = "Choose the date preached.";
+    if (form.series === NEW_SERIES && !form.newSeries.trim()) errs.newSeries = "Name the new series.";
+    if (!validUrl(form.video_url.trim())) errs.video_url = "Enter a full link starting with https://";
+    if (!validUrl(form.audio_url.trim())) errs.audio_url = "Enter a full link starting with https://";
+    setErrors(errs);
+    if (Object.keys(errs).length) return;
+    setSaving(true);
+    setApiError(null);
+    try {
+      let seriesId: string | null = form.series || null;
+      if (form.series === NEW_SERIES) {
+        const created = await seriesApi.create(t, { title: form.newSeries.trim(), is_active: true });
+        seriesId = created.id;
+        seriesList.reload();
+      }
+      const payload = {
+        title: form.title.trim(),
+        speaker: form.speaker.trim(),
+        date: form.date,
+        scripture_reference: form.scripture_reference.trim(),
+        series: seriesId,
+        description: form.description.trim(),
+        video_url: form.video_url.trim(),
+        audio_url: form.audio_url.trim(),
+        tags: form.tags.split(",").map((x) => x.trim()).filter(Boolean),
+        is_published: form.is_published,
+      };
+      if (editing) {
+        await sermonsApi.update(t, editing.id, payload);
+        toast.success("Sermon updated", payload.title);
+      } else {
+        await sermonsApi.create(t, payload);
+        toast.success("Sermon added", payload.is_published ? `${payload.title} is published.` : `${payload.title} was saved as a draft.`);
+      }
+      setOpen(false);
+      sermons.reload();
+    } catch (err) {
+      setApiError(err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // ── Delete ─────────────────────────────────────────────────────────────
+  const [toDelete, setToDelete] = useState<Sermon | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const confirmDelete = async () => {
+    if (!token || !toDelete || deleting) return;
+    setDeleting(true);
+    try {
+      await sermonsApi.remove(t, toDelete.id);
+      toast.success("Sermon deleted", toDelete.title);
+      setToDelete(null);
+      sermons.reload();
+    } catch (err) {
+      toast.error("Couldn't delete sermon", errorMessage(err));
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const list = sermons.data ?? [];
+  const filtersActive = Boolean(debouncedSearch || series || published !== "all");
+
   return (
-    <div className="flex flex-col gap-6 slide-up">
-      {/* ── Header ─────────────────────────────────────────────────── */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <nav className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider mb-1" style={{ color: "#747686" }}>
-            <span>Home</span>
-            <span className="material-symbols-outlined text-xs">chevron_right</span>
-            <span style={{ color: "#0037b0" }}>Sermons &amp; Media</span>
-          </nav>
-          <h1 className="text-2xl font-bold" style={{ color: "#131b2e", letterSpacing: "-0.015em" }}>
-            Sermon Archive &amp; Media
-          </h1>
-          <p className="text-sm mt-0.5" style={{ color: "#434655" }}>
-            Manage Sunday pulpit recordings, series artwork, study notes, and podcasts
-          </p>
-        </div>
+    <div className="flex flex-col gap-6">
+      <PageHeader
+        title="Sermons"
+        description="The sermon archive: messages, speakers, scripture and media links."
+        actions={
+          <Button variant="primary" icon="add" onClick={() => openForm(null)}>
+            Add sermon
+          </Button>
+        }
+      />
 
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowUploadModal(true)}
-            className="sanctuary-btn-primary text-xs"
-          >
-            <span className="material-symbols-outlined text-sm">cloud_upload</span>
-            Upload Sermon
-          </button>
-        </div>
-      </div>
-
-      {/* ── Search Bar ──────────────────────────────────────────────── */}
-      <div className="relative max-w-md">
-        <span className="material-symbols-outlined absolute left-3.5 top-1/2 -translate-y-1/2 text-sm" style={{ color: "#747686" }}>
-          search
-        </span>
-        <input
-          type="text"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search by sermon title, preacher, or scripture..."
-          className="w-full pl-10 pr-4 py-2.5 rounded-xl sanctuary-input text-xs"
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <Segmented<Published>
+          label="Filter by publish state"
+          value={published}
+          onChange={setPublished}
+          options={[
+            { value: "all", label: "All" },
+            { value: "published", label: "Published" },
+            { value: "draft", label: "Drafts" },
+          ]}
         />
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_220px] lg:min-w-[480px]">
+          <SearchInput value={search} onChange={setSearch} placeholder="Search title, speaker or scripture" label="Search sermons" />
+          <Select aria-label="Filter by series" value={series} onChange={(e) => setSeries(e.target.value)}>
+            <option value="">All series</option>
+            {(seriesList.data ?? []).map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.title}
+              </option>
+            ))}
+          </Select>
+        </div>
       </div>
 
-      {/* ── Sermon Cards Grid ────────────────────────────────────────── */}
-      {loading ? (
-        <div className="flex items-center justify-center h-48" style={{ color: "#747686" }}>
-          <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin mr-2" />
-          Loading sermon library...
-        </div>
-      ) : filtered.length === 0 ? (
-        <div className="sanctuary-card p-12 text-center text-xs" style={{ color: "#747686" }}>
-          No sermons matching your search query.
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-          {filtered.map((s) => (
-            <div
-              key={s.id}
-              className="sanctuary-card overflow-hidden flex flex-col justify-between hover:shadow-md transition-shadow group"
-            >
-              <div>
-                {/* Banner Header */}
-                <div
-                  className="h-36 relative flex items-center justify-center p-4"
-                  style={{
-                    background: "linear-gradient(135deg, #1d4ed8 0%, #002171 100%)",
-                    color: "#ffffff",
-                  }}
-                >
-                  <div className="absolute top-3 left-3">
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-white/20 backdrop-blur-md">
-                      {s.series_title || "Sunday Sermon"}
-                    </span>
-                  </div>
-                  <div className="w-12 h-12 rounded-full bg-white/20 backdrop-blur-md flex items-center justify-center group-hover:scale-110 transition-transform cursor-pointer">
-                    <span className="material-symbols-outlined text-2xl text-white">play_arrow</span>
-                  </div>
-                  <div className="absolute bottom-3 right-3 text-[11px] font-medium bg-black/40 px-2 py-0.5 rounded-md">
-                    {s.views_count} views
-                  </div>
-                </div>
-
-                {/* Body */}
-                <div className="p-5 space-y-2">
-                  <div className="flex items-center gap-1.5 text-xs font-semibold" style={{ color: "#855300" }}>
-                    <span className="material-symbols-outlined text-sm">menu_book</span>
-                    <span>{s.scripture_reference}</span>
-                  </div>
-
-                  <h3 className="text-base font-bold line-clamp-1" style={{ color: "#131b2e" }}>
-                    {s.title}
-                  </h3>
-
-                  <div className="flex items-center gap-2 pt-1 text-xs" style={{ color: "#434655" }}>
-                    <span className="material-symbols-outlined text-sm" style={{ color: "#0037b0" }}>person</span>
-                    <span className="font-semibold">{s.speaker}</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Card Footer */}
-              <div className="px-5 py-3 border-t flex items-center justify-between text-xs" style={{ borderColor: "#e2e7ff", background: "#f2f3ff" }}>
-                <span style={{ color: "#747686" }}>
-                  {new Date(s.date).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
-                </span>
-                <div className="flex items-center gap-2">
-                  <button className="text-[#0037b0] hover:underline font-bold text-[11px] flex items-center gap-0.5">
-                    <span className="material-symbols-outlined text-xs">headphones</span> Listen
-                  </button>
-                  <button className="text-[#0037b0] hover:underline font-bold text-[11px] flex items-center gap-0.5">
-                    <span className="material-symbols-outlined text-xs">download</span> Notes
-                  </button>
-                </div>
-              </div>
-            </div>
+      {sermons.loading && !sermons.data ? (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <Card key={i} className="space-y-3 p-5">
+              <Skeleton className="h-4 w-28" />
+              <Skeleton className="h-5 w-3/4" />
+              <Skeleton className="h-3.5 w-1/2" />
+            </Card>
           ))}
         </div>
-      )}
-
-      {/* ── Modal: Upload Sermon ─────────────────────────────────────── */}
-      {showUploadModal && (
-        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
-          <div className="sanctuary-card w-full max-w-md p-6 space-y-4 shadow-2xl">
-            <div className="flex items-center justify-between pb-2 border-b" style={{ borderColor: "#e2e7ff" }}>
-              <h3 className="text-base font-bold" style={{ color: "#131b2e" }}>Upload Sermon Recording</h3>
-              <button onClick={() => setShowUploadModal(false)} className="text-gray-400 hover:text-gray-600">
-                <span className="material-symbols-outlined">close</span>
-              </button>
-            </div>
-
-            <form onSubmit={handleUpload} className="space-y-4">
-              <div>
-                <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-                  Sermon Title
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. Walking in Divine Purpose"
-                  value={newTitle}
-                  onChange={(e) => setNewTitle(e.target.value)}
-                  className="w-full sanctuary-input text-sm"
-                />
-              </div>
-
-              <div>
-                <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-                  Preacher / Speaker
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={newSpeaker}
-                  onChange={(e) => setNewSpeaker(e.target.value)}
-                  className="w-full sanctuary-input text-sm"
-                />
-              </div>
-
-              <div>
-                <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-                  Scripture Reference
-                </label>
-                <input
-                  type="text"
-                  placeholder="e.g. Romans 8:28-39"
-                  value={newScripture}
-                  onChange={(e) => setNewScripture(e.target.value)}
-                  className="w-full sanctuary-input text-sm"
-                />
-              </div>
-
-              <div>
-                <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-                  Sermon Series
-                </label>
-                <input
-                  type="text"
-                  value={newSeries}
-                  onChange={(e) => setNewSeries(e.target.value)}
-                  className="w-full sanctuary-input text-sm"
-                />
-              </div>
-
-              <div className="flex items-center justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowUploadModal(false)}
-                  className="sanctuary-btn-secondary text-xs"
+      ) : sermons.error ? (
+        <Card>
+          <ErrorState message={sermons.error} onRetry={sermons.reload} />
+        </Card>
+      ) : list.length === 0 ? (
+        <Card>
+          {filtersActive ? (
+            <EmptyState
+              icon="search_off"
+              title="No sermons match"
+              description="Try another search or clear the filters."
+              action={
+                <Button
+                  onClick={() => {
+                    setSearch("");
+                    setSeries("");
+                    setPublished("all");
+                  }}
                 >
-                  Cancel
-                </button>
-                <button type="submit" className="sanctuary-btn-primary text-xs">
-                  Save Sermon
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+                  Clear filters
+                </Button>
+              }
+            />
+          ) : (
+            <EmptyState
+              icon="auto_stories"
+              title="The sermon archive is empty"
+              description="Add sermons with their speaker, scripture and video or audio links."
+              action={
+                <Button variant="primary" icon="add" onClick={() => openForm(null)}>
+                  Add sermon
+                </Button>
+              }
+            />
+          )}
+        </Card>
+      ) : (
+        <ul className={`grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3 ${sermons.loading ? "opacity-60" : ""}`}>
+          {list.map((s) => (
+            <li key={s.id}>
+              <Card className="card-interactive flex h-full flex-col p-5">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex flex-wrap gap-1.5">
+                    {s.series_title && <Badge tone="brand">{s.series_title}</Badge>}
+                    {!s.is_published && <Badge tone="warning">Draft</Badge>}
+                  </div>
+                  <div className="-mr-2 -mt-1 flex">
+                    <Button variant="ghost" size="xs" iconOnly icon="edit" aria-label={`Edit ${s.title}`} title="Edit" onClick={() => openForm(s)} />
+                    <Button variant="danger-ghost" size="xs" iconOnly icon="delete" aria-label={`Delete ${s.title}`} title="Delete" onClick={() => setToDelete(s)} />
+                  </div>
+                </div>
+                <h3 className="mt-3 text-[15px] font-semibold leading-snug text-ink">{s.title}</h3>
+                <p className="mt-1 text-[13px] text-ink-muted">
+                  {s.speaker} · {formatDate(s.date)}
+                </p>
+                {s.scripture_reference && (
+                  <p className="mt-2 inline-flex items-center gap-1.5 text-[13px] font-medium text-accent-ink">
+                    <Icon name="menu_book" size={16} />
+                    {s.scripture_reference}
+                  </p>
+                )}
+                {s.tags?.length > 0 && (
+                  <div className="mt-3 flex flex-wrap gap-1">
+                    {s.tags.slice(0, 4).map((tag) => (
+                      <span key={tag} className="rounded bg-canvas px-1.5 py-0.5 text-[11px] text-ink-muted">
+                        #{tag}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <div className="flex-1" />
+                <div className="mt-4 flex items-center justify-between gap-2 border-t border-line pt-3">
+                  <span className="text-[12px] text-ink-subtle">{formatNumber(s.views_count)} views</span>
+                  <div className="flex gap-1">
+                    {s.video_url && (
+                      <a href={s.video_url} target="_blank" rel="noopener noreferrer" className="btn btn-ghost btn-xs" aria-label={`Watch ${s.title} (opens in a new tab)`}>
+                        <Icon name="play_circle" size={16} />
+                        Watch
+                      </a>
+                    )}
+                    {s.audio_url && (
+                      <a href={s.audio_url} target="_blank" rel="noopener noreferrer" className="btn btn-ghost btn-xs" aria-label={`Listen to ${s.title} (opens in a new tab)`}>
+                        <Icon name="headphones" size={16} />
+                        Listen
+                      </a>
+                    )}
+                    {!s.video_url && !s.audio_url && <span className="text-[12px] text-ink-subtle">No media links</span>}
+                  </div>
+                </div>
+              </Card>
+            </li>
+          ))}
+        </ul>
       )}
+
+      <Modal
+        isOpen={open}
+        onClose={() => setOpen(false)}
+        title={editing ? "Edit sermon" : "Add sermon"}
+        subtitle="Media is linked by URL (for example YouTube or a podcast host)."
+        maxWidth="xl"
+        isSubmitting={saving}
+        footer={
+          <>
+            <Button onClick={() => setOpen(false)} disabled={saving}>
+              Cancel
+            </Button>
+            <Button type="submit" form="sermon-form" variant="primary" loading={saving}>
+              {editing ? "Save changes" : "Add sermon"}
+            </Button>
+          </>
+        }
+      >
+        <form id="sermon-form" onSubmit={save} noValidate className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          {apiError ? (
+            <Alert className="sm:col-span-2" title="Couldn't save sermon">
+              {errorMessage(apiError)}
+            </Alert>
+          ) : null}
+          <Field label="Title" required error={errors.title || fieldError(apiError, "title")} className="sm:col-span-2">
+            {(p) => <Input {...p} value={form.title} disabled={saving} onChange={(e) => setF("title", e.target.value)} />}
+          </Field>
+          <Field label="Speaker" required error={errors.speaker || fieldError(apiError, "speaker")}>
+            {(p) => <Input {...p} value={form.speaker} disabled={saving} onChange={(e) => setF("speaker", e.target.value)} />}
+          </Field>
+          <Field label="Date preached" required error={errors.date || fieldError(apiError, "date")}>
+            {(p) => <Input {...p} type="date" value={form.date} disabled={saving} onChange={(e) => setF("date", e.target.value)} />}
+          </Field>
+          <Field label="Scripture reference">
+            {(p) => <Input {...p} value={form.scripture_reference} disabled={saving} placeholder="e.g. Romans 8:28–39" onChange={(e) => setF("scripture_reference", e.target.value)} />}
+          </Field>
+          <Field label="Series">
+            {(p) => (
+              <Select {...p} value={form.series} disabled={saving} onChange={(e) => setF("series", e.target.value)}>
+                <option value="">No series</option>
+                {(seriesList.data ?? []).map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.title}
+                  </option>
+                ))}
+                <option value={NEW_SERIES}>+ New series…</option>
+              </Select>
+            )}
+          </Field>
+          {form.series === NEW_SERIES && (
+            <Field label="New series title" required error={errors.newSeries} className="sm:col-span-2">
+              {(p) => <Input {...p} value={form.newSeries} disabled={saving} onChange={(e) => setF("newSeries", e.target.value)} />}
+            </Field>
+          )}
+          <Field label="Video link" error={errors.video_url || fieldError(apiError, "video_url")}>
+            {(p) => <Input {...p} type="url" inputMode="url" placeholder="https://" value={form.video_url} disabled={saving} onChange={(e) => setF("video_url", e.target.value)} />}
+          </Field>
+          <Field label="Audio link" error={errors.audio_url || fieldError(apiError, "audio_url")}>
+            {(p) => <Input {...p} type="url" inputMode="url" placeholder="https://" value={form.audio_url} disabled={saving} onChange={(e) => setF("audio_url", e.target.value)} />}
+          </Field>
+          <Field label="Summary" className="sm:col-span-2">
+            {(p) => <Textarea {...p} rows={3} value={form.description} disabled={saving} onChange={(e) => setF("description", e.target.value)} />}
+          </Field>
+          <Field label="Tags" hint="Separate with commas, e.g. faith, prayer" className="sm:col-span-2">
+            {(p) => <Input {...p} value={form.tags} disabled={saving} onChange={(e) => setF("tags", e.target.value)} />}
+          </Field>
+          <div className="rounded-lg border border-line bg-surface-muted p-4 sm:col-span-2">
+            <Switch checked={form.is_published} onChange={(v) => setF("is_published", v)} disabled={saving} label="Published" description="Drafts are only visible to staff." />
+          </div>
+        </form>
+      </Modal>
+
+      <ConfirmDialog
+        isOpen={Boolean(toDelete)}
+        onClose={() => setToDelete(null)}
+        onConfirm={confirmDelete}
+        title="Delete sermon?"
+        message={
+          <>
+            <strong className="font-semibold text-ink">{toDelete?.title}</strong> will be permanently removed from the archive.
+          </>
+        }
+        confirmText="Delete sermon"
+        isLoading={deleting}
+      />
     </div>
   );
 }

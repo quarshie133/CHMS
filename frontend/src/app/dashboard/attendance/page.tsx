@@ -1,414 +1,626 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type SyntheticEvent } from "react";
+import Link from "next/link";
 import { useAuth } from "@/lib/auth-context";
-import { attendanceApi, type ServiceRecord } from "@/lib/api";
+import {
+  attendanceApi,
+  attendanceRecordsApi,
+  errorMessage,
+  fieldError,
+  listAll,
+  membersApi,
+  serviceTypesApi,
+  type AttendanceRecord,
+  type Member,
+  type ServiceRecord,
+} from "@/lib/api";
+import { useAsync } from "@/lib/hooks";
+import { formatDate, formatNumber, initialsFromName, todayISO } from "@/lib/format";
 import { Modal, ConfirmDialog } from "@/components/ui/modal";
 import { useToast } from "@/components/ui/toast";
+import { Checkbox, Field, Input, Select, Textarea } from "@/components/ui/form";
+import { BarChart } from "@/components/charts";
+import {
+  Alert,
+  Avatar,
+  Badge,
+  Button,
+  Card,
+  CardHeader,
+  EmptyState,
+  ErrorState,
+  PageHeader,
+  Pagination,
+  Segmented,
+  Skeleton,
+  StatCard,
+  TableSkeleton,
+} from "@/components/ui/primitives";
+
+const PAGE_SIZE = 20;
+const NEW_TYPE = "__new__";
+const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+
+interface ServiceForm {
+  service_type: string;
+  newTypeName: string;
+  newTypeDay: string;
+  date: string;
+  title: string;
+  expected_count: string;
+  notes: string;
+}
+
+const emptyService = (): ServiceForm => ({
+  service_type: "",
+  newTypeName: "",
+  newTypeDay: WEEKDAYS[new Date().getDay()],
+  date: todayISO(),
+  title: "",
+  expected_count: "",
+  notes: "",
+});
 
 export default function AttendancePage() {
   const { token } = useAuth();
-  const { success, error } = useToast();
-  const [services, setServices] = useState<ServiceRecord[]>([]);
-  const [trends, setTrends] = useState<Array<{ date: string; count: number; service_type__name: string }>>([]);
-  const [loading, setLoading] = useState(true);
-  const [showLogModal, setShowLogModal] = useState(false);
-  const [newCount, setNewCount] = useState(240);
-  const [newDate, setNewDate] = useState(new Date().toISOString().split("T")[0]);
-  const [newServiceType, setNewServiceType] = useState("Sunday Main Service");
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const toast = useToast();
+  const t = token ?? "";
+  const [page, setPage] = useState(1);
+
+  const services = useAsync(
+    token ? () => attendanceApi.list(t, `ordering=-date&page=${page}&page_size=${PAGE_SIZE}`) : null,
+    [token, page]
+  );
+  const types = useAsync(token ? () => listAll(serviceTypesApi.list, t) : null, [token]);
+  const trends = useAsync(token ? () => attendanceApi.trends(t) : null, [token]);
+  const firstTimers = useAsync(token ? () => attendanceRecordsApi.list(t, "is_first_time=true&page_size=1") : null, [token]);
+
+  const refreshAll = () => {
+    services.reload();
+    trends.reload();
+    firstTimers.reload();
+  };
+
+  const trendData = trends.data ?? [];
+  const avg = trendData.length ? Math.round(trendData.reduce((s, r) => s + r.count, 0) / trendData.length) : null;
+  const latest = services.data?.results[0];
+
+  // ── Create / edit service ──────────────────────────────────────────────
+  const [formOpen, setFormOpen] = useState(false);
+  const [editing, setEditing] = useState<ServiceRecord | null>(null);
+  const [form, setForm] = useState<ServiceForm>(emptyService);
+  const [formErrors, setFormErrors] = useState<Partial<Record<keyof ServiceForm, string>>>({});
+  const [apiError, setApiError] = useState<unknown>(null);
+  const [saving, setSaving] = useState(false);
+  const setF = <K extends keyof ServiceForm>(k: K, v: ServiceForm[K]) => {
+    setForm((f) => ({ ...f, [k]: v }));
+    setFormErrors((e) => ({ ...e, [k]: undefined }));
+  };
+
+  const openCreate = () => {
+    setEditing(null);
+    const f = emptyService();
+    f.service_type = types.data?.[0]?.id ?? NEW_TYPE;
+    setForm(f);
+    setFormErrors({});
+    setApiError(null);
+    setFormOpen(true);
+  };
+
+  const openEdit = (s: ServiceRecord) => {
+    setEditing(s);
+    setForm({
+      ...emptyService(),
+      service_type: s.service_type ?? "",
+      date: s.date,
+      title: s.title ?? "",
+      expected_count: s.expected_count ? String(s.expected_count) : "",
+      notes: s.notes ?? "",
+    });
+    setFormErrors({});
+    setApiError(null);
+    setFormOpen(true);
+    // The list endpoint omits notes; load them so saving doesn't clear them.
+    attendanceApi
+      .get(t, s.id)
+      .then((full) => setForm((f) => ({ ...f, notes: full.notes ?? "" })))
+      .catch(() => undefined);
+  };
+
+  const handleSave = async (e: SyntheticEvent) => {
+    e.preventDefault();
+    if (!token || saving) return;
+    const errs: typeof formErrors = {};
+    if (!form.service_type) errs.service_type = "Choose a service type.";
+    if (form.service_type === NEW_TYPE && !form.newTypeName.trim()) errs.newTypeName = "Name the new service type.";
+    if (!form.date) errs.date = "Choose a date.";
+    setFormErrors(errs);
+    if (Object.keys(errs).length) return;
+    setSaving(true);
+    setApiError(null);
+    try {
+      let typeId = form.service_type;
+      if (typeId === NEW_TYPE) {
+        const created = await serviceTypesApi.create(t, { name: form.newTypeName.trim(), default_day: form.newTypeDay, is_active: true });
+        typeId = created.id;
+        types.reload();
+      }
+      const payload = {
+        service_type: typeId,
+        date: form.date,
+        title: form.title.trim(),
+        expected_count: form.expected_count ? Number(form.expected_count) : null,
+        notes: form.notes.trim(),
+      };
+      if (editing) {
+        await attendanceApi.update(t, editing.id, payload);
+        toast.success("Service updated");
+      } else {
+        await attendanceApi.create(t, payload);
+        toast.success("Service created", "You can now check people in.");
+      }
+      setFormOpen(false);
+      refreshAll();
+    } catch (err) {
+      setApiError(err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // ── Delete ─────────────────────────────────────────────────────────────
+  const [toDelete, setToDelete] = useState<ServiceRecord | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const confirmDelete = async () => {
+    if (!token || !toDelete || deleting) return;
+    setDeleting(true);
+    try {
+      await attendanceApi.remove(t, toDelete.id);
+      toast.success("Service deleted", "The service and its check-ins were removed.");
+      setToDelete(null);
+      refreshAll();
+    } catch (err) {
+      toast.error("Couldn't delete service", errorMessage(err));
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  // ── Check-in drawer ────────────────────────────────────────────────────
+  const [checkInService, setCheckInService] = useState<ServiceRecord | null>(null);
+
+  const rows = services.data?.results ?? [];
+  const uniqueTypeError = apiError && errorMessage(apiError).toLowerCase().includes("unique");
+
+  return (
+    <div className="flex flex-col gap-6">
+      <PageHeader
+        title="Attendance"
+        description="Create a service, then check members and guests in. Totals are calculated from check-ins."
+        actions={
+          <Button variant="primary" icon="add" onClick={openCreate} disabled={types.loading}>
+            New service
+          </Button>
+        }
+      />
+
+      <section aria-label="Attendance summary" className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard
+          label="Latest service"
+          icon="how_to_reg"
+          loading={services.loading && !services.data}
+          value={latest ? formatNumber(latest.actual_count) : "—"}
+          hint={latest ? `${latest.service_type_name ?? "Service"} · ${formatDate(latest.date)}` : "No services yet"}
+        />
+        <StatCard
+          label="12-week average"
+          icon="monitoring"
+          tone="success"
+          loading={trends.loading}
+          value={avg === null ? "—" : formatNumber(avg)}
+          hint={trendData.length ? `Across ${trendData.length} service${trendData.length === 1 ? "" : "s"}` : "No recent services"}
+        />
+        <StatCard
+          label="First-time guests"
+          icon="waving_hand"
+          tone="accent"
+          loading={firstTimers.loading}
+          value={firstTimers.error ? "—" : formatNumber(firstTimers.data?.count)}
+          hint="All recorded check-ins"
+        />
+        <StatCard
+          label="Services recorded"
+          icon="event_note"
+          tone="neutral"
+          loading={services.loading && !services.data}
+          value={formatNumber(services.data?.count)}
+          hint="All time"
+        />
+      </section>
+
+      <Card>
+        <CardHeader title="Attendance trend" description="Check-ins per service over the last 12 weeks" icon="monitoring" />
+        <div className="px-5 pb-5">
+          {trends.loading ? (
+            <Skeleton className="h-48 w-full" />
+          ) : trends.error ? (
+            <ErrorState compact message={trends.error} onRetry={trends.reload} />
+          ) : trendData.length === 0 ? (
+            <p className="rounded-lg border border-dashed border-line px-4 py-10 text-center text-[13px] text-ink-muted">
+              Trends appear once services in the last 12 weeks have check-ins.
+            </p>
+          ) : (
+            <BarChart
+              caption="Check-ins per service"
+              valueLabel="Check-ins"
+              data={trendData.map((r, i) => ({
+                key: `${r.date}-${i}`,
+                label: formatDate(r.date, { month: "short", day: "numeric" }),
+                value: r.count,
+              }))}
+            />
+          )}
+        </div>
+      </Card>
+
+      <Card className="overflow-hidden">
+        <CardHeader title="Services" description="Most recent first" icon="event_note" />
+        {services.loading && !services.data ? (
+          <TableSkeleton rows={5} cols={3} />
+        ) : services.error ? (
+          <ErrorState message={services.error} onRetry={services.reload} />
+        ) : rows.length === 0 ? (
+          <EmptyState
+            icon="fact_check"
+            title="No services recorded"
+            description="Create your first service, then check people in as they arrive."
+            action={
+              <Button variant="primary" icon="add" onClick={openCreate}>
+                New service
+              </Button>
+            }
+          />
+        ) : (
+          <>
+            <div className="overflow-x-auto">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Date</th>
+                    <th scope="col">Service</th>
+                    <th scope="col" className="num">
+                      Checked in
+                    </th>
+                    <th scope="col" className="num hidden sm:table-cell">
+                      Expected
+                    </th>
+                    <th scope="col">
+                      <span className="sr-only">Actions</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((s) => (
+                    <tr key={s.id}>
+                      <td className="whitespace-nowrap">{formatDate(s.date, { weekday: "short", month: "short", day: "numeric", year: "numeric" })}</td>
+                      <td>
+                        <span className="block font-medium">{s.service_type_name}</span>
+                        {s.title && <span className="block text-[13px] text-ink-muted">{s.title}</span>}
+                      </td>
+                      <td className="num font-semibold">{formatNumber(s.actual_count)}</td>
+                      <td className="num hidden text-ink-muted sm:table-cell">{s.expected_count ? formatNumber(s.expected_count) : "—"}</td>
+                      <td>
+                        <div className="flex items-center justify-end gap-1">
+                          <Button size="sm" icon="how_to_reg" onClick={() => setCheckInService(s)}>
+                            Check in
+                          </Button>
+                          <Button variant="ghost" size="sm" iconOnly icon="edit" aria-label={`Edit service on ${formatDate(s.date)}`} title="Edit" onClick={() => openEdit(s)} />
+                          <Button variant="danger-ghost" size="sm" iconOnly icon="delete" aria-label={`Delete service on ${formatDate(s.date)}`} title="Delete" onClick={() => setToDelete(s)} />
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <Pagination page={page} pageSize={PAGE_SIZE} total={services.data?.count ?? 0} onPageChange={setPage} noun="services" />
+          </>
+        )}
+      </Card>
+
+      {/* New / edit service */}
+      <Modal
+        isOpen={formOpen}
+        onClose={() => setFormOpen(false)}
+        title={editing ? "Edit service" : "New service"}
+        subtitle={editing ? "Update the service details." : "Create the service you want to record attendance for."}
+        maxWidth="lg"
+        isSubmitting={saving}
+        footer={
+          <>
+            <Button onClick={() => setFormOpen(false)} disabled={saving}>
+              Cancel
+            </Button>
+            <Button type="submit" form="service-form" variant="primary" loading={saving}>
+              {editing ? "Save changes" : "Create service"}
+            </Button>
+          </>
+        }
+      >
+        <form id="service-form" onSubmit={handleSave} noValidate className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          {apiError ? (
+            <Alert className="sm:col-span-2" title="Couldn't save service">
+              {uniqueTypeError ? "A service of this type already exists on this date. Open it from the list to check people in." : errorMessage(apiError)}
+            </Alert>
+          ) : null}
+          <Field label="Service type" required error={formErrors.service_type} className="sm:col-span-2">
+            {(p) => (
+              <Select {...p} value={form.service_type} disabled={saving} onChange={(e) => setF("service_type", e.target.value)}>
+                <option value="" disabled>
+                  Select a service type
+                </option>
+                {(types.data ?? []).map((st) => (
+                  <option key={st.id} value={st.id}>
+                    {st.name}
+                  </option>
+                ))}
+                <option value={NEW_TYPE}>+ New service type…</option>
+              </Select>
+            )}
+          </Field>
+          {form.service_type === NEW_TYPE && (
+            <>
+              <Field label="New type name" required error={formErrors.newTypeName} hint="e.g. Sunday Morning, Midweek Prayer">
+                {(p) => <Input {...p} value={form.newTypeName} disabled={saving} onChange={(e) => setF("newTypeName", e.target.value)} />}
+              </Field>
+              <Field label="Usual day">
+                {(p) => (
+                  <Select {...p} value={form.newTypeDay} disabled={saving} onChange={(e) => setF("newTypeDay", e.target.value)}>
+                    {WEEKDAYS.map((d) => (
+                      <option key={d} value={d}>
+                        {d.charAt(0).toUpperCase() + d.slice(1)}
+                      </option>
+                    ))}
+                  </Select>
+                )}
+              </Field>
+            </>
+          )}
+          <Field label="Date" required error={formErrors.date || fieldError(apiError, "date")}>
+            {(p) => <Input {...p} type="date" value={form.date} disabled={saving} onChange={(e) => setF("date", e.target.value)} />}
+          </Field>
+          <Field label="Expected attendance" hint="Optional planning figure" error={fieldError(apiError, "expected_count")}>
+            {(p) => <Input {...p} type="number" min={0} inputMode="numeric" value={form.expected_count} disabled={saving} onChange={(e) => setF("expected_count", e.target.value)} />}
+          </Field>
+          <Field label="Title" hint="Optional, e.g. Harvest Sunday" className="sm:col-span-2">
+            {(p) => <Input {...p} value={form.title} disabled={saving} onChange={(e) => setF("title", e.target.value)} />}
+          </Field>
+          <Field label="Notes" className="sm:col-span-2">
+            {(p) => <Textarea {...p} rows={2} value={form.notes} disabled={saving} onChange={(e) => setF("notes", e.target.value)} />}
+          </Field>
+        </form>
+      </Modal>
+
+      <ConfirmDialog
+        isOpen={Boolean(toDelete)}
+        onClose={() => setToDelete(null)}
+        onConfirm={confirmDelete}
+        title="Delete service?"
+        message={
+          <>
+            The {toDelete?.service_type_name} service on <strong className="font-semibold text-ink">{toDelete ? formatDate(toDelete.date) : ""}</strong>{" "}
+            and all {toDelete?.actual_count ?? 0} check-in{toDelete?.actual_count === 1 ? "" : "s"} will be permanently deleted.
+          </>
+        }
+        confirmText="Delete service"
+        isLoading={deleting}
+      />
+
+      <CheckInDrawer key={checkInService?.id ?? "closed"} service={checkInService} token={t} onClose={() => setCheckInService(null)} onChanged={refreshAll} />
+    </div>
+  );
+}
+
+/* ── Check-in drawer ─────────────────────────────────────────────────── */
+type CheckInMode = "member" | "guest";
+
+function CheckInDrawer({
+  service,
+  token,
+  onClose,
+  onChanged,
+}: {
+  service: ServiceRecord | null;
+  token: string;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const toast = useToast();
+  const [records, setRecords] = useState<AttendanceRecord[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [members, setMembers] = useState<Member[]>([]);
+  const [mode, setMode] = useState<CheckInMode>("member");
+  const [memberId, setMemberId] = useState("");
+  const [guestName, setGuestName] = useState("");
+  const [guestPhone, setGuestPhone] = useState("");
+  const [firstTime, setFirstTime] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState("");
+  const [removingId, setRemovingId] = useState<string | null>(null);
 
-  // Delete state
-  const [deletingRecord, setDeletingRecord] = useState<ServiceRecord | null>(null);
-  const [isDeleting, setIsDeleting] = useState(false);
+  const fetchRecords = useCallback(() => {
+    if (!service) return;
+    listAll(attendanceRecordsApi.list, token, `service=${service.id}`)
+      .then(setRecords)
+      .catch((e) => setLoadError(errorMessage(e)));
+  }, [service, token]);
 
-  const fetchAttendance = () => {
-    if (!token) return;
-    setLoading(true);
-    Promise.all([
-      attendanceApi.list(token).then((r) => setServices(r.results as ServiceRecord[])),
-      attendanceApi.trends(token).then(setTrends),
-    ])
-      .catch((e) => {
-        console.warn("Could not fetch remote attendance data, using mock", e);
-        setTrends([
-          { date: "Aug 03", count: 285, service_type__name: "Sunday Service" },
-          { date: "Aug 10", count: 298, service_type__name: "Sunday Service" },
-          { date: "Aug 17", count: 310, service_type__name: "Sunday Service" },
-          { date: "Aug 24", count: 290, service_type__name: "Sunday Service" },
-          { date: "Aug 31", count: 315, service_type__name: "Sunday Service" },
-          { date: "Sep 07", count: 325, service_type__name: "Sunday Service" },
-          { date: "Sep 14", count: 340, service_type__name: "Sunday Service" },
-          { date: "Sep 21", count: 330, service_type__name: "Sunday Service" },
-          { date: "Sep 28", count: 352, service_type__name: "Sunday Service" },
-        ]);
-        setServices([
-          { id: "1", date: "2026-09-28", actual_count: 352, service_type__name: "Sunday Main Service (10:00 AM)" },
-          { id: "2", date: "2026-09-24", actual_count: 142, service_type__name: "Midweek Fellowship & Prayer" },
-          { id: "3", date: "2026-09-21", actual_count: 330, service_type__name: "Sunday Main Service (10:00 AM)" },
-          { id: "4", date: "2026-09-17", actual_count: 135, service_type__name: "Midweek Fellowship & Prayer" },
-          { id: "5", date: "2026-09-14", actual_count: 340, service_type__name: "Sunday Main Service (10:00 AM)" },
-        ]);
-      })
-      .finally(() => setLoading(false));
+  const retry = () => {
+    setLoadError(null);
+    setRecords(null);
+    fetchRecords();
   };
 
   useEffect(() => {
-    fetchAttendance();
-  }, [token]);
+    if (!service) return;
+    listAll(attendanceRecordsApi.list, token, `service=${service.id}`)
+      .then(setRecords)
+      .catch((e) => setLoadError(errorMessage(e)));
+    if (members.length === 0) listAll(membersApi.list, token, "ordering=last_name").then(setMembers).catch(() => setMembers([]));
+  }, [service, token, members.length]);
 
-  const maxCount = trends.length ? Math.max(...trends.map((t) => t.count), 1) : 400;
+  const checkedIn = useMemo(() => new Set((records ?? []).map((r) => r.member).filter(Boolean) as string[]), [records]);
+  const available = members.filter((m) => !checkedIn.has(m.id));
 
-  const handleLogAttendance = async (e: React.FormEvent) => {
+  const submit = async (e: SyntheticEvent) => {
     e.preventDefault();
-    if (newCount <= 0) {
-      setFormError("Attendance count must be greater than zero.");
-      return;
-    }
-    setIsSubmitting(true);
+    if (!service || submitting) return;
+    if (mode === "member" && !memberId) return setFormError("Choose a person to check in.");
+    if (mode === "guest" && !guestName.trim()) return setFormError("Enter the guest's name.");
+    setSubmitting(true);
     setFormError("");
     try {
-      if (token) {
-        try {
-          const created = await attendanceApi.create(token, {
-            date: newDate,
-            actual_count: Number(newCount),
-            notes: newServiceType,
-          });
-          setServices((prev) => [
-            {
-              ...created,
-              service_type__name: newServiceType,
-            },
-            ...prev,
-          ]);
-        } catch {
-          // If remote fails, fallback local record
-          const fallbackEntry: ServiceRecord = {
-            id: Date.now().toString(),
-            date: newDate,
-            actual_count: Number(newCount),
-            service_type__name: newServiceType,
-          };
-          setServices((prev) => [fallbackEntry, ...prev]);
-        }
-      }
-      success("Service attendance recorded successfully.");
-      setShowLogModal(false);
-      setNewCount(240);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Failed to record attendance.";
-      setFormError(msg);
-      error(msg);
+      const now = new Date();
+      const created = await attendanceRecordsApi.create(token, {
+        service: service.id,
+        member: mode === "member" ? memberId : null,
+        guest_name: mode === "guest" ? guestName.trim() : "",
+        guest_phone: mode === "guest" ? guestPhone.trim() : "",
+        is_first_time: firstTime,
+        check_in_time: `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`,
+      });
+      setRecords((r) => [created, ...(r ?? [])]);
+      toast.success("Checked in", `${created.member_name || created.guest_name} was checked in.`);
+      setMemberId("");
+      setGuestName("");
+      setGuestPhone("");
+      setFirstTime(false);
+      onChanged();
+    } catch (err) {
+      const msg = errorMessage(err);
+      setFormError(msg.toLowerCase().includes("unique") ? "This person is already checked in to this service." : msg);
     } finally {
-      setIsSubmitting(false);
+      setSubmitting(false);
     }
   };
 
-  const handleDeleteRecord = async () => {
-    if (!deletingRecord) return;
-    setIsDeleting(true);
+  const remove = async (r: AttendanceRecord) => {
+    if (removingId) return;
+    setRemovingId(r.id);
     try {
-      if (token) {
-        try {
-          await attendanceApi.remove(token, deletingRecord.id);
-        } catch {
-          // Continue with local removal if mock/tenant
-        }
-      }
-      setServices((prev) => prev.filter((s) => s.id !== deletingRecord.id));
-      success("Attendance record removed.");
-      setDeletingRecord(null);
-    } catch (err: unknown) {
-      error(err instanceof Error ? err.message : "Failed to delete record.");
+      await attendanceRecordsApi.remove(token, r.id);
+      setRecords((list) => (list ?? []).filter((x) => x.id !== r.id));
+      toast.success("Check-in removed", `${r.member_name || r.guest_name} was removed from this service.`);
+      onChanged();
+    } catch (err) {
+      toast.error("Couldn't remove check-in", errorMessage(err));
     } finally {
-      setIsDeleting(false);
+      setRemovingId(null);
     }
   };
 
   return (
-    <div className="flex flex-col gap-6 slide-up">
-      {/* ── Header ─────────────────────────────────────────────────── */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <nav className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider mb-1" style={{ color: "#747686" }}>
-            <span>Home</span>
-            <span className="material-symbols-outlined text-xs">chevron_right</span>
-            <span style={{ color: "#0037b0" }}>Attendance</span>
-          </nav>
-          <h1 className="text-2xl font-bold" style={{ color: "#131b2e", letterSpacing: "-0.015em" }}>
-            Attendance &amp; Check-in
-          </h1>
-          <p className="text-sm mt-0.5" style={{ color: "#434655" }}>
-            Track sanctuary congregation counts, children&apos;s check-in kiosks, and weekly trends
-          </p>
+    <Modal
+      isOpen={Boolean(service)}
+      onClose={onClose}
+      title={service ? `${service.service_type_name} · ${formatDate(service.date)}` : "Check in"}
+      subtitle={records ? `${records.length} checked in${service?.expected_count ? ` of ${service.expected_count} expected` : ""}` : "Loading check-ins…"}
+      variant="drawer"
+      maxWidth="sm:max-w-md"
+    >
+      <form onSubmit={submit} className="rounded-lg border border-line bg-surface-muted p-4">
+        <Segmented<CheckInMode>
+          label="Check-in type"
+          size="sm"
+          value={mode}
+          onChange={(m) => {
+            setMode(m);
+            setFormError("");
+          }}
+          options={[
+            { value: "member", label: "Person in directory", icon: "person" },
+            { value: "guest", label: "Guest", icon: "waving_hand" },
+          ]}
+        />
+        <div className="mt-4 flex flex-col gap-3">
+          {mode === "member" ? (
+            <Field label="Person" error={formError || undefined}>
+              {(p) => (
+                <Select {...p} value={memberId} disabled={submitting} onChange={(e) => setMemberId(e.target.value)}>
+                  <option value="">{members.length === 0 ? "Loading people…" : `Select a person (${available.length} not yet checked in)`}</option>
+                  {available.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.full_name}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+          ) : (
+            <>
+              <Field label="Guest name" required error={formError || undefined}>
+                {(p) => <Input {...p} value={guestName} disabled={submitting} onChange={(e) => setGuestName(e.target.value)} />}
+              </Field>
+              <Field label="Phone">
+                {(p) => <Input {...p} type="tel" value={guestPhone} disabled={submitting} onChange={(e) => setGuestPhone(e.target.value)} />}
+              </Field>
+            </>
+          )}
+          <Checkbox checked={firstTime} onChange={setFirstTime} disabled={submitting} label="First time attending" />
+          <Button type="submit" variant="primary" icon="how_to_reg" loading={submitting} className="w-full">
+            Check in
+          </Button>
         </div>
+      </form>
 
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowLogModal(true)}
-            className="sanctuary-btn-primary text-xs"
-          >
-            <span className="material-symbols-outlined text-sm">fact_check</span>
-            Record Attendance
-          </button>
-        </div>
-      </div>
-
-      {/* ── KPI Stat Summary Cards ───────────────────────────────────── */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {[
-          { label: "Sunday Average", value: "332", note: "+7.8% vs last month", color: "#0037b0", icon: "people" },
-          { label: "Latest Headcount", value: "352", note: "Sunday Sep 28", color: "#006b2c", icon: "how_to_reg" },
-          { label: "Midweek Attendance", value: "142", note: "Fellowship Hall", color: "#855300", icon: "diversity_3" },
-          { label: "Kiosk Check-in Rate", value: "94%", note: "Children & Youth", color: "#7c3aed", icon: "badge" },
-        ].map((stat, i) => (
-          <div key={i} className="sanctuary-card p-4 space-y-1.5">
-            <div className="flex items-center justify-between text-xs">
-              <span className="font-semibold uppercase tracking-wider text-[11px]" style={{ color: "#747686" }}>
-                {stat.label}
-              </span>
-              <span className="material-symbols-outlined text-lg" style={{ color: stat.color }}>{stat.icon}</span>
-            </div>
-            <div className="text-2xl font-black" style={{ color: "#131b2e" }}>
-              {stat.value}
-            </div>
-            <p className="text-[11px] font-medium" style={{ color: stat.color }}>
-              {stat.note}
-            </p>
+      <div className="mt-5">
+        {loadError ? (
+          <ErrorState compact message={loadError} onRetry={retry} />
+        ) : !records ? (
+          <div className="space-y-3">
+            <Skeleton className="h-12 w-full" />
+            <Skeleton className="h-12 w-full" />
           </div>
-        ))}
-      </div>
-
-      {/* ── Trend Bar Chart ──────────────────────────────────────────── */}
-      <div className="sanctuary-card p-6 space-y-4">
-        <div className="flex items-center justify-between pb-3 border-b" style={{ borderColor: "#e2e7ff" }}>
-          <div>
-            <h2 className="text-base font-bold" style={{ color: "#131b2e" }}>
-              Attendance Trend — Last Weeks
-            </h2>
-            <p className="text-xs" style={{ color: "#747686" }}>Sunday congregation growth pattern</p>
-          </div>
-          <span className="pill pill-green text-xs font-bold">Growing</span>
-        </div>
-
-        {loading ? (
-          <div className="flex items-center justify-center h-48" style={{ color: "#747686" }}>
-            <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin mr-2" />
-            Loading trend metrics...
-          </div>
-        ) : trends.length === 0 ? (
-          <div className="text-center py-12 text-xs" style={{ color: "#747686" }}>
-            No attendance trends recorded yet.
-          </div>
+        ) : records.length === 0 ? (
+          <EmptyState compact icon="how_to_reg" title="No one checked in yet" description="Check-ins you add will appear here." />
         ) : (
-          <div className="flex items-end gap-3 h-48 pt-6 pb-2 px-2 overflow-x-auto">
-            {trends.map((t, idx) => {
-              const heightPct = Math.round((t.count / maxCount) * 100);
+          <ul className="divide-y divide-line rounded-lg border border-line">
+            {records.map((r) => {
+              const name = r.member_name || r.guest_name || "Unknown";
               return (
-                <div key={idx} className="flex-1 flex flex-col items-center gap-2 group min-w-[36px]">
-                  <span className="text-[10px] font-bold opacity-0 group-hover:opacity-100 transition-opacity" style={{ color: "#0037b0" }}>
-                    {t.count}
-                  </span>
-                  <div
-                    className="w-full rounded-t-lg transition-all group-hover:brightness-110"
-                    style={{
-                      height: `${Math.max(12, heightPct * 1.4)}px`,
-                      background: idx === trends.length - 1 ? "#1d4ed8" : "#93b0ff",
-                    }}
+                <li key={r.id} className="flex items-center gap-3 px-3 py-2.5">
+                  <Avatar name={name} initials={initialsFromName(name)} size={32} />
+                  <div className="min-w-0 flex-1">
+                    {r.member ? (
+                      <Link href={`/dashboard/members/${r.member}`} className="block truncate text-sm font-medium text-ink hover:text-brand hover:underline">
+                        {name}
+                      </Link>
+                    ) : (
+                      <span className="block truncate text-sm font-medium text-ink">{name}</span>
+                    )}
+                    <span className="block text-[12px] text-ink-muted">
+                      {r.member ? "Member" : "Guest"}
+                      {r.check_in_time ? ` · ${r.check_in_time.slice(0, 5)}` : ""}
+                    </span>
+                  </div>
+                  {r.is_first_time && <Badge tone="accent">First time</Badge>}
+                  <Button
+                    variant="danger-ghost"
+                    size="xs"
+                    iconOnly
+                    icon="close"
+                    loading={removingId === r.id}
+                    aria-label={`Remove check-in for ${name}`}
+                    title="Remove check-in"
+                    onClick={() => remove(r)}
                   />
-                  <span className="text-[10px] font-semibold truncate" style={{ color: "#747686" }}>
-                    {t.date}
-                  </span>
-                </div>
+                </li>
               );
             })}
-          </div>
+          </ul>
         )}
       </div>
-
-      {/* ── Recent Services Table ────────────────────────────────────── */}
-      <div className="sanctuary-card overflow-hidden">
-        <div className="p-4 border-b flex items-center justify-between" style={{ borderColor: "#e2e7ff" }}>
-          <h2 className="text-sm font-bold uppercase tracking-wider" style={{ color: "#131b2e" }}>
-            Recent Gatherings &amp; Service Records
-          </h2>
-          <span className="text-xs" style={{ color: "#747686" }}>
-            Showing {services.length} recorded gatherings
-          </span>
-        </div>
-
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead>
-              <tr className="border-b text-xs font-semibold uppercase tracking-wider" style={{ borderColor: "#e2e7ff", color: "#747686" }}>
-                <th className="px-5 py-3">Service / Gathering</th>
-                <th className="px-5 py-3">Date</th>
-                <th className="px-5 py-3 text-right">Verified Count</th>
-                <th className="px-5 py-3 text-right">Kiosk Check-in</th>
-                <th className="px-5 py-3 text-center">Status</th>
-                <th className="px-5 py-3 text-center">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y" style={{ borderColor: "#f2f3ff" }}>
-              {services.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="p-12 text-center text-xs" style={{ color: "#747686" }}>
-                    <div className="flex flex-col items-center justify-center gap-2">
-                      <div
-                        className="w-12 h-12 rounded-full flex items-center justify-center"
-                        style={{ background: "#eaedff", color: "#0037b0" }}
-                      >
-                        <span className="material-symbols-outlined text-2xl">fact_check</span>
-                      </div>
-                      <p className="font-semibold text-sm" style={{ color: "#131b2e" }}>No attendance records logged yet</p>
-                      <p className="text-xs">Keep track of headcounts across Sunday services and midweek fellowships.</p>
-                      <button
-                        onClick={() => setShowLogModal(true)}
-                        className="sanctuary-btn-primary text-xs mt-1"
-                      >
-                        <span className="material-symbols-outlined text-sm">add</span>
-                        Record Attendance
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ) : (
-                services.map((srv) => (
-                  <tr key={srv.id} className="hover:bg-[#f2f3ff]/40 transition-colors">
-                    <td className="px-5 py-3.5 font-semibold" style={{ color: "#131b2e" }}>
-                      {srv.service_type__name || "Sunday Main Worship"}
-                    </td>
-                    <td className="px-5 py-3.5 text-xs" style={{ color: "#747686" }}>
-                      {srv.date}
-                    </td>
-                    <td className="px-5 py-3.5 text-right font-black" style={{ color: "#0037b0" }}>
-                      {srv.actual_count}
-                    </td>
-                    <td className="px-5 py-3.5 text-right text-xs font-semibold" style={{ color: "#006b2c" }}>
-                      {Math.round(srv.actual_count * 0.92)} (92%)
-                    </td>
-                    <td className="px-5 py-3.5 text-center">
-                      <span className="pill pill-green text-[10px] font-bold uppercase">
-                        Verified
-                      </span>
-                    </td>
-                    <td className="px-5 py-3.5 text-center">
-                      <button
-                        onClick={() => setDeletingRecord(srv)}
-                        className="p-1.5 rounded-lg hover:bg-red-50 text-gray-400 hover:text-red-600 transition-colors"
-                        title="Delete Record"
-                        type="button"
-                      >
-                        <span className="material-symbols-outlined text-[18px]">delete</span>
-                      </button>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* ── Modal: Record Attendance ── */}
-      <Modal
-        isOpen={showLogModal}
-        onClose={() => !isSubmitting && setShowLogModal(false)}
-        title="Record Service Attendance"
-        subtitle="Log verified headcount for church service or gathering"
-        maxWidth="md"
-        isSubmitting={isSubmitting}
-      >
-        <form onSubmit={handleLogAttendance} className="space-y-4">
-          {formError && (
-            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
-              <span className="material-symbols-outlined text-sm">error</span>
-              <span>{formError}</span>
-            </div>
-          )}
-
-          <div>
-            <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-              Service / Gathering Name *
-            </label>
-            <select
-              value={newServiceType}
-              disabled={isSubmitting}
-              onChange={(e) => setNewServiceType(e.target.value)}
-              className="w-full sanctuary-input text-sm cursor-pointer disabled:opacity-50"
-            >
-              <option value="Sunday Main Service (10:00 AM)">Sunday Main Service (10:00 AM)</option>
-              <option value="Sunday Early Service (8:00 AM)">Sunday Early Service (8:00 AM)</option>
-              <option value="Midweek Fellowship & Prayer">Midweek Fellowship &amp; Prayer</option>
-              <option value="Youth Night Gathering">Youth Night Gathering</option>
-            </select>
-          </div>
-
-          <div>
-            <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-              Date *
-            </label>
-            <input
-              type="date"
-              required
-              disabled={isSubmitting}
-              value={newDate}
-              onChange={(e) => setNewDate(e.target.value)}
-              className="w-full sanctuary-input text-sm disabled:opacity-50"
-            />
-          </div>
-
-          <div>
-            <label className="text-xs font-bold uppercase tracking-wider block mb-1.5" style={{ color: "#747686" }}>
-              Actual Headcount *
-            </label>
-            <input
-              type="number"
-              min={1}
-              required
-              disabled={isSubmitting}
-              value={newCount}
-              onChange={(e) => setNewCount(Number(e.target.value))}
-              className="w-full sanctuary-input text-sm disabled:opacity-50"
-            />
-          </div>
-
-          <div className="flex items-center justify-end gap-2 pt-3 border-t" style={{ borderColor: "#f2f3ff" }}>
-            <button
-              type="button"
-              disabled={isSubmitting}
-              onClick={() => setShowLogModal(false)}
-              className="sanctuary-btn-secondary text-xs disabled:opacity-50"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={isSubmitting}
-              className="sanctuary-btn-primary text-xs flex items-center gap-1.5 disabled:opacity-60"
-            >
-              {isSubmitting && (
-                <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-              )}
-              <span>Save Attendance</span>
-            </button>
-          </div>
-        </form>
-      </Modal>
-
-      {/* ── Confirm Delete Dialog ── */}
-      <ConfirmDialog
-        isOpen={Boolean(deletingRecord)}
-        onClose={() => !isDeleting && setDeletingRecord(null)}
-        onConfirm={handleDeleteRecord}
-        title="Delete Attendance Record"
-        message={`Are you sure you want to remove the attendance count of ${deletingRecord?.actual_count} on ${deletingRecord?.date}?`}
-        confirmText="Delete Record"
-        isDestructive={true}
-        isLoading={isDeleting}
-      />
-    </div>
+    </Modal>
   );
 }
