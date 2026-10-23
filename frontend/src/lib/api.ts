@@ -8,6 +8,10 @@ export interface ApiError {
   status: number;
   detail: string;
   fieldErrors?: Record<string, string[] | string>;
+  /** Machine-readable error code from the API (e.g. "confirmation_required"). */
+  code?: string;
+  /** Full JSON error body, for endpoints that return extra context. */
+  body?: Record<string, unknown>;
 }
 
 /** Fired on `window` when the access token was refreshed (detail: new token). */
@@ -56,6 +60,8 @@ async function toApiError(res: Response): Promise<ApiError> {
     status: res.status,
     detail: detail || res.statusText || "Request failed",
     fieldErrors: typeof body === "object" && body !== null && !body.detail ? body : undefined,
+    code: typeof body?.code === "string" ? body.code : undefined,
+    body: typeof body === "object" && body !== null ? body : undefined,
   };
 }
 
@@ -497,6 +503,13 @@ export interface MemberStats {
 export const memberStatsApi = (token: string) =>
   request<MemberStats>("/members/stats/", {}, token);
 
+export type AudienceSpec =
+  | { type: "active" | "everyone" | "visitors" }
+  | { type: "group"; group_id: string }
+  | { type: "life_stage"; life_stage: string }
+  | { type: "members"; member_ids: string[] }
+  | { type: "phone"; phone: string; name?: string };
+
 export interface Campaign {
   id: string;
   name: string;
@@ -505,18 +518,97 @@ export interface Campaign {
   recipient_count: number;
   sent_count: number;
   failed_count?: number;
+  unknown_count?: number;
+  skipped_count?: number;
   subject?: string;
   body?: string;
-  recipients_filter?: Record<string, unknown>;
+  sender_id?: string;
+  recipients_filter?: AudienceSpec | Record<string, unknown>;
+  audience_label?: string;
+  dry_run?: boolean;
+  last_error?: string;
   scheduled_at?: string | null;
+  processing_started_at?: string | null;
   sent_at?: string | null;
+  completed_at?: string | null;
+  sent_by_user_id?: number | null;
   created_at: string;
 }
 
+export interface CampaignRecipient {
+  id: string;
+  member_id: string | null;
+  name: string;
+  address: string;
+  status: string;
+  provider_message_id: string;
+  delivery_status: string;
+  error_code: string;
+  error_message: string;
+  attempts: number;
+  sent_at: string | null;
+}
+
+export interface CampaignAuditEntry {
+  id: number;
+  action: string;
+  user_id: number | null;
+  detail: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface AudiencePreview {
+  matched: number;
+  recipients: number;
+  invalid: number;
+  missing_contact: number;
+  duplicates_removed: number;
+  invalid_sample: Array<{ member_id: string | null; name: string }>;
+  segments_per_message?: number;
+  encoding?: string;
+  characters?: number;
+  estimated_segments?: number;
+  requires_confirmation: boolean;
+  max_recipients: number;
+}
+
+export interface SmsConfig {
+  provider: string;
+  configured: boolean;
+  api_key_configured: boolean;
+  dry_run: boolean;
+  sender_ids: string[];
+  default_sender_id: string;
+  large_broadcast_threshold: number;
+  max_recipients: number;
+  max_message_length: number;
+}
+
+const CAMPAIGNS = "/communications/campaigns/";
+const post = (body?: unknown): RequestInit => ({ method: "POST", body: body === undefined ? undefined : JSON.stringify(body) });
+
 export const communicationsApi = {
-  ...resource<Campaign>("/communications/campaigns/"),
-  send: (token: string, id: string) =>
-    request<{ detail: string }>(`/communications/campaigns/${id}/send/`, { method: "POST" }, token),
+  ...resource<Campaign>(CAMPAIGNS),
+  preview: (token: string, data: { channel: string; recipients_filter: AudienceSpec; body?: string }) =>
+    request<AudiencePreview>(`${CAMPAIGNS}preview/`, post(data), token),
+  send: (token: string, id: string, confirmRecipientCount?: number) =>
+    request<{ detail: string; dry_run: boolean; recipient_count: number; skipped: number }>(
+      `${CAMPAIGNS}${id}/send/`, post({ confirm_recipient_count: confirmRecipientCount }), token
+    ),
+  retryFailed: (token: string, id: string, confirmRecipientCount?: number) =>
+    request<{ detail: string; recipient_count: number }>(
+      `${CAMPAIGNS}${id}/retry-failed/`, post({ confirm_recipient_count: confirmRecipientCount }), token
+    ),
+  resolveUnknown: (token: string, id: string, outcome: "sent" | "failed") =>
+    request<{ detail: string; updated: number }>(`${CAMPAIGNS}${id}/resolve-unknown/`, post({ outcome }), token),
+  refreshStatus: (token: string, id: string) =>
+    request<{ detail: string }>(`${CAMPAIGNS}${id}/refresh-status/`, post(), token),
+  recipients: (token: string, id: string, params = "") =>
+    request<PaginatedResponse<CampaignRecipient> & { status_totals: Record<string, number> }>(
+      `${CAMPAIGNS}${id}/recipients/?${params}`, {}, token
+    ),
+  audit: (token: string, id: string) => request<CampaignAuditEntry[]>(`${CAMPAIGNS}${id}/audit/`, {}, token),
+  smsConfig: (token: string) => request<SmsConfig>("/communications/sms/config/", {}, token),
 };
 
 export const usersApi = {

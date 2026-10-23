@@ -1,1 +1,5 @@
-default_app_config = "config.celery.app"
+# Load the Celery app whenever Django starts so @shared_task.delay() uses the
+# configured broker (REDIS_URL) instead of Celery's default AMQP broker.
+from .celery import app as celery_app
+
+__all__ = ("celery_app",)

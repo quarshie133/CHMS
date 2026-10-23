@@ -178,6 +178,10 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "config.pagination.StandardResultsSetPagination",
     "PAGE_SIZE": 25,
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    "DEFAULT_THROTTLE_RATES": {
+        # Broadcast send/retry requests per user (ScopedRateThrottle).
+        "sms_send": os.environ.get("SMS_SEND_RATE", "20/hour"),
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -258,11 +262,25 @@ EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
 DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "noreply@churchms.com")
 
 # ---------------------------------------------------------------------------
-# Twilio (SMS)
+# SMS — AgooSMS (see docs/SMS_AGOOSMS.md)
 # ---------------------------------------------------------------------------
-TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
-TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
-TWILIO_PHONE_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER", "")
+AGOOSMS_BASE_URL = os.environ.get("AGOOSMS_BASE_URL", "https://api.agoosms.com")
+# Secret: set ONE of these. Never commit a real key.
+AGOOSMS_API_KEY = os.environ.get("AGOOSMS_API_KEY", "")
+AGOOSMS_API_KEY_SSM_PARAMETER = os.environ.get("AGOOSMS_API_KEY_SSM_PARAMETER", "")  # AWS SSM SecureString name
+AGOOSMS_API_KEY_SECRET_ID = os.environ.get("AGOOSMS_API_KEY_SECRET_ID", "")  # AWS Secrets Manager id/ARN
+AWS_REGION = os.environ.get("AWS_REGION", "")
+# Approved sender ID(s), comma-separated; the first is the default.
+AGOOSMS_SENDER_ID = os.environ.get("AGOOSMS_SENDER_ID", "")
+AGOOSMS_TIMEOUT = float(os.environ.get("AGOOSMS_TIMEOUT", 30))
+# Recipients per bulk request. The provider's limit is undocumented; keep conservative.
+AGOOSMS_MAX_BULK = int(os.environ.get("AGOOSMS_MAX_BULK", 100))
+# Test mode: messages are recorded as "simulated" and never sent. Must be explicitly
+# set to False in production to send real SMS.
+SMS_DRY_RUN = os.environ.get("SMS_DRY_RUN", "True").strip().lower() in ("true", "1", "yes")
+SMS_LARGE_BROADCAST_THRESHOLD = int(os.environ.get("SMS_LARGE_BROADCAST_THRESHOLD", 25))
+SMS_MAX_RECIPIENTS = int(os.environ.get("SMS_MAX_RECIPIENTS", 5000))
+SMS_MAX_MESSAGE_LENGTH = int(os.environ.get("SMS_MAX_MESSAGE_LENGTH", 918))
 
 # ---------------------------------------------------------------------------
 # Phone number

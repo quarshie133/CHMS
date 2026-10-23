@@ -1,0 +1,6 @@
+{
+  // The Django project root is backend/, so imports like `apps.accounts.permissions`
+  // resolve from there. Without this, the editor reports them as missing.
+  "python.defaultInterpreterPath": "${workspaceFolder}/backend/venv/Scripts/python.exe",
+  "python.analysis.extraPaths": ["${workspaceFolder}/backend"]
+}

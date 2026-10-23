@@ -1,0 +1,7 @@
+# Type-checker config: the Django project root is backend/, so `apps.*` and `config.*`
+# imports resolve from there. Type stubs (django-stubs etc.) come from the backend venv
+# (pip install -r backend/requirements/dev.txt).
+project-includes = ["backend"]
+project-excludes = ["backend/venv", "backend/pgdata", "**/migrations"]
+search-path = ["backend"]
+site-package-path = ["backend/venv/Lib/site-packages"]
